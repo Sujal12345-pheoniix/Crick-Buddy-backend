@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Academy {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
+}
+
+model User {
+  id              String           @id @default(uuid())
+  name            String
+  email           String           @unique
+  password        String
+  role            String           @default("player")
+  avatar          String?
+  phone           String?
+  dateOfBirth     DateTime?
+  battingStyle    String           @default("right-handed")
+  bowlingStyle    String           @default("none")
+  playerType      String           @default("batsman")
+  experienceLevel String           @default("beginner")
+  academyId       String?
+  isActive        Boolean          @default(true)
+  lastLogin       DateTime?
+  totalUploads    Int              @default(0)
+  totalReports    Int              @default(0)
+  overallScore    Float            @default(0)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  reports         AnalysisReport[]
+  progress        ProgressEntry[]
+  uploads         Upload[]
+  academy         Academy?         @relation(fields: [academyId], references: [id])
+}
+
+model Upload {
+  id                 String           @id @default(uuid())
+  userId             String
+  type               String
+  filename           String
+  originalName       String
+  mimeType           String?
+  fileSize           Int?
+  fileUrl            String
+  status             String           @default("pending")
+  processingProgress Int              @default(0)
+  errorMessage       String?
+  notes              String?
+  duration           Float?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  reports            AnalysisReport[]
+  user               User             @relation(fields: [userId], references: [id])
+}
+
+model AnalysisReport {
+  id                     String          @id @default(uuid())
+  uploadId               String
+  userId                 String
+  type                   String
+  stanceScore            Float?
+  batSwingAngle          Float?
+  headPosition           String?
+  headPositionScore      Float?
+  timingScore            Float?
+  followThroughScore     Float?
+  shotType               String?
+  overallBattingScore    Float?
+  wristPositionScore     Float?
+  wristPositionNote      String?
+  armRotationAngle       Float?
+  armRotationScore       Float?
+  releasePointScore      Float?
+  releasePointNote       String?
+  estimatedBallSpeed     Float?
+  balanceScoreBowling    Float?
+  bowlingStyle           String?
+  overallBowlingScore    Float?
+  shoulderAlignmentScore Float?
+  shoulderAlignmentNote  String?
+  kneeBendAngle          Float?
+  kneeBendScore          Float?
+  balanceScorePosture    Float?
+  spinePosScore          Float?
+  overallPostureScore    Float?
+  strengths              Json?
+  weaknesses             Json?
+  improvementSuggestions Json?
+  trainingDrills         Json?
+  overallScore           Float?
+  landmarks              Json?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+  bestPractices          Json?
+  recommendations        Json?
+  mistakes               Json?
+  upload                 Upload          @relation(fields: [uploadId], references: [id])
+  user                   User            @relation(fields: [userId], references: [id])
+  progressEntries        ProgressEntry[]
+}
+
+model ProgressEntry {
+  id                 String          @id @default(uuid())
+  userId             String
+  reportId           String?
+  type               String
+  date               DateTime        @default(now())
+  batSwingAngle      Float?
+  stanceScore        Float?
+  timingScore        Float?
+  followThroughScore Float?
+  estimatedBallSpeed Float?
+  armRotationAngle   Float?
+  wristPositionScore Float?
+  releasePointScore  Float?
+  balanceScore       Float?
+  overallScore       Float?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  report             AnalysisReport? @relation(fields: [reportId], references: [id])
+  user               User            @relation(fields: [userId], references: [id])
+}
+
+model Match {
+  id         String   @id @default(uuid())
+  title      String
+  date       DateTime
+  location   String?
+  status     String   @default("upcoming")
+  scoreData  Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  externalId String?
+  source     String?
+
+  @@index([externalId, source])
+}
+
+model Tournament {
+  id          String   @id @default(uuid())
+  name        String
+  startDate   DateTime
+  endDate     DateTime
+  location    String
+  description String?
+  status      String   @default("upcoming")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  latitude    Float?
+  longitude   Float?
+}
