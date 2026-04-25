@@ -18,7 +18,7 @@ async function seed() {
     // Hash passwords
     const adminPassword = await bcrypt.hash('admin123', 10);
     const coachPassword = await bcrypt.hash('coach123', 10);
-    const playerPassword = await bcrypt.hash('player123', 10);
+    const playerPassword = await bcrypt.hash('demo123', 10);
 
     console.log('👥 Creating users...');
 

@@ -14,15 +14,17 @@ const toPublicJSON = (user) => {
 router.post('/register', async (req, res) => {
     try {
         const { name, email, password, role, playerType, experienceLevel, battingStyle, bowlingStyle } = req.body;
+        const normalizedName = String(name || '').trim();
+        const normalizedEmail = String(email || '').trim().toLowerCase();
 
-        if (!name || !email || !password) {
+        if (!normalizedName || !normalizedEmail || !password) {
             return res.status(400).json({ success: false, message: 'Name, email and password are required' });
         }
         if (password.length < 6) {
             return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
         }
 
-        const exists = await prisma.user.findUnique({ where: { email } });
+        const exists = await prisma.user.findUnique({ where: { email: normalizedEmail } });
         if (exists) {
             return res.status(409).json({ success: false, message: 'Email already registered' });
         }
@@ -31,8 +33,8 @@ router.post('/register', async (req, res) => {
         
         const user = await prisma.user.create({
             data: {
-                name, 
-                email, 
+                name: normalizedName,
+                email: normalizedEmail,
                 password: hashedPassword,
                 role: role || 'player',
                 playerType: playerType || 'batsman',
@@ -61,11 +63,12 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        if (!email || !password) {
+        const normalizedEmail = String(email || '').trim().toLowerCase();
+        if (!normalizedEmail || !password) {
             return res.status(400).json({ success: false, message: 'Email and password required' });
         }
 
-        const user = await prisma.user.findUnique({ where: { email } });
+        const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
         if (!user) {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
