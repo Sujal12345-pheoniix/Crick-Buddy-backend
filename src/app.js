@@ -25,7 +25,8 @@ app.use(cors({
     origin: [
         "https://crick-buddy-frontend.vercel.app", // ✅ your deployed frontend
         "http://localhost:3000", // ✅ local dev
-        "https://www.crickbuddy.com" // ✅ production domain
+        "https://www.crickbuddy.com", // ✅ production domain
+        "https://crickbuddy.tech" // ✅ production domain
     ],
     credentials: true
 }));
