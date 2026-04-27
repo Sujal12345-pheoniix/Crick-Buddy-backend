@@ -18,20 +18,45 @@ const tournamentRoutes = require('./routes/tournaments');
 
 const app = express();
 
-// Security & middleware
+// ✅ Security & middleware
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: [
+        "https://crick-buddy-frontend.vercel.app", // ✅ your deployed frontend
+        "http://localhost:3000" // ✅ local dev
+    ],
     credentials: true
 }));
+
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Static files (uploaded media)
+// ✅ Static files (uploads)
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
-// API Routes
+// =========================
+// ✅ ROOT ROUTE (IMPORTANT)
+// =========================
+app.get('/', (req, res) => {
+    res.send("CrickBuddy Backend Running 🚀");
+});
+
+// =========================
+// ✅ HEALTH CHECK
+// =========================
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        service: 'crick-buddy-backend',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// =========================
+// ✅ API ROUTES
+// =========================
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/uploads', uploadRoutes);
@@ -44,17 +69,19 @@ app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/tournaments', tournamentRoutes);
 
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', service: 'crick-buddy-backend', timestamp: new Date().toISOString() });
-});
-
-// 404 handler
+// =========================
+// ❌ 404 HANDLER (KEEP LAST)
+// =========================
 app.use((req, res) => {
-    res.status(404).json({ success: false, message: 'Route not found' });
+    res.status(404).json({
+        success: false,
+        message: 'Route not found'
+    });
 });
 
-// Error handler
+// =========================
+// ❌ ERROR HANDLER
+// =========================
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(err.status || 500).json({
