@@ -11,3 +11,7 @@ app.get("/", (req, res) => {
   res.send("CrickBuddy Backend Running 🚀");
 });
 
+app.use(cors({
+  origin: "https://crick-buddy-frontend.vercel.app",
+  credentials: true
+}))
