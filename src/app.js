@@ -21,14 +21,22 @@ const app = express();
 // ✅ Security & middleware
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
+const allowedOrigins = [
+  "https://crickbuddy.tech",
+  "https://www.crickbuddy.tech",
+  "https://crick-buddy-frontend.vercel.app",
+  "http://localhost:3000"
+];
+
 app.use(cors({
-    origin: [
-        "https://crick-buddy-frontend.vercel.app", // ✅ your deployed frontend
-        "http://localhost:3000", // ✅ local dev
-        "https://www.crickbuddy.com", // ✅ production domain
-        "https://crickbuddy.tech" // ✅ production domain
-    ],
-    credentials: true
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true
 }));
 
 app.use(morgan('dev'));
