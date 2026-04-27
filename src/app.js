@@ -24,7 +24,8 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({
     origin: [
         "https://crick-buddy-frontend.vercel.app", // ✅ your deployed frontend
-        "http://localhost:3000" // ✅ local dev
+        "http://localhost:3000", // ✅ local dev
+        "https://www.crickbuddy.com" // ✅ production domain
     ],
     credentials: true
 }));
