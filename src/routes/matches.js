@@ -147,23 +147,50 @@ function mapRapidMatch(match) {
     const date = info.startDate ? new Date(parseInt(info.startDate)) : new Date();
 
     const scoreLines = [];
+    
+    // Team 1 Score
     if (score.team1Score) {
-        const s1 = score.team1Score.inngs1 || {};
-        scoreLines.push(`${info.team1?.teamSName || 'T1'}: ${s1.runs || 0}/${s1.wickets || 0} (${s1.overs || 0})`);
+        const inngs = [];
+        if (score.team1Score.inngs1) {
+            const s = score.team1Score.inngs1;
+            inngs.push(`${s.runs || 0}/${s.wickets || 0} (${s.overs || 0})`);
+        }
+        if (score.team1Score.inngs2) {
+            const s = score.team1Score.inngs2;
+            inngs.push(`${s.runs || 0}/${s.wickets || 0} (${s.overs || 0})`);
+        }
+        if (inngs.length) {
+            scoreLines.push(`${info.team1?.teamSName || 'T1'}: ${inngs.join(' & ')}`);
+        }
     }
+
+    // Team 2 Score
     if (score.team2Score) {
-        const s2 = score.team2Score.inngs1 || {};
-        scoreLines.push(`${info.team2?.teamSName || 'T2'}: ${s2.runs || 0}/${s2.wickets || 0} (${s2.overs || 0})`);
+        const inngs = [];
+        if (score.team2Score.inngs1) {
+            const s = score.team2Score.inngs1;
+            inngs.push(`${s.runs || 0}/${s.wickets || 0} (${s.overs || 0})`);
+        }
+        if (score.team2Score.inngs2) {
+            const s = score.team2Score.inngs2;
+            inngs.push(`${s.runs || 0}/${s.wickets || 0} (${s.overs || 0})`);
+        }
+        if (inngs.length) {
+            scoreLines.push(`${info.team2?.teamSName || 'T2'}: ${inngs.join(' & ')}`);
+        }
     }
+
+    // Status description
+    const statusText = info.status || match.status || 'Upcoming';
 
     return {
         externalId: info.matchId ? String(info.matchId) : null,
         source: 'rapidapi-cricbuzz',
-        title: `${info.team1?.teamName} vs ${info.team2?.teamName} (${info.matchDesc || 'Match'})`,
+        title: `${info.team1?.teamName || 'Team 1'} vs ${info.team2?.teamName || 'Team 2'} (${info.matchDesc || 'Match'})`,
         date,
         location: info.venueInfo ? `${info.venueInfo.ground}, ${info.venueInfo.city}` : 'International Venue',
-        status: normalizeStatus({ status: info.status || '', matchStarted: !!score.team1Score }),
-        scoreData: scoreLines.length ? scoreLines.map(line => ({ inning: line })) : [{ status: info.status || 'Upcoming' }]
+        status: normalizeStatus({ status: statusText, matchStarted: !!(score.team1Score || score.team2Score) }),
+        scoreData: scoreLines.length ? scoreLines.map(line => ({ inning: line })) : [{ status: statusText }]
     };
 }
 
@@ -185,26 +212,34 @@ async function syncMatchesFromExternal() {
     if (rapidKey && rapidKey !== 'dummy') {
         try {
             console.log('Syncing from RapidAPI Cricbuzz...');
-            const response = await axios.get('https://cricbuzz-cricket.p.rapidapi.com/matches/v1/live', {
-                headers: {
-                    'x-rapidapi-key': rapidKey,
-                    'x-rapidapi-host': 'cricbuzz-cricket.p.rapidapi.com'
-                },
-                timeout: 10000
-            });
+            
+            // Fetch live, recent and upcoming to be comprehensive
+            const endpoints = ['live', 'recent', 'upcoming'];
+            for (const ep of endpoints) {
+                try {
+                    const response = await axios.get(`https://cricbuzz-cricket.p.rapidapi.com/matches/v1/${ep}`, {
+                        headers: {
+                            'x-rapidapi-key': rapidKey,
+                            'x-rapidapi-host': 'cricbuzz-cricket.p.rapidapi.com'
+                        },
+                        timeout: 10000
+                    });
 
-            // Cricbuzz returns matches in nested typeMatches -> seriesMatches -> seriesAdWrapper -> matches
-            const typeMatches = response.data?.typeMatches || [];
-            for (const type of typeMatches) {
-                for (const series of (type.seriesMatches || [])) {
-                    if (series.seriesAdWrapper && series.seriesAdWrapper.matches) {
-                        for (const m of series.seriesAdWrapper.matches) {
-                            incoming.push(mapRapidMatch(m));
+                    const typeMatches = response.data?.typeMatches || [];
+                    for (const type of typeMatches) {
+                        for (const series of (type.seriesMatches || [])) {
+                            // Check if it's a seriesAdWrapper or direct matches
+                            const matches = series.seriesAdWrapper?.matches || series.matches || [];
+                            for (const m of matches) {
+                                incoming.push(mapRapidMatch(m));
+                            }
                         }
                     }
+                } catch (epErr) {
+                    console.warn(`RapidAPI Cricbuzz ${ep} sync failed:`, epErr.message);
                 }
             }
-            console.log(`RapidAPI: Found ${incoming.length} live/recent matches`);
+            console.log(`RapidAPI: Found ${incoming.length} matches across all categories`);
         } catch (err) {
             console.warn('RapidAPI Cricbuzz sync failed:', err.message);
         }

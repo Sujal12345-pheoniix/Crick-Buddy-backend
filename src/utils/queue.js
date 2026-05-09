@@ -225,12 +225,21 @@ async function processJob(job) {
             });
             analysis = response.data;
         } catch (aiErr) {
+            const status = aiErr.response?.status;
             const d = aiErr.response?.data?.detail;
             const reason =
                 (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
                 aiErr.response?.data?.message ||
                 aiErr.message;
-            console.warn(`⚠️  AI analysis unavailable for upload ${uploadId}. Using fallback report. Reason: ${reason}`);
+            
+            // If it's a 400 error, it's a validation failure (e.g. wrong video). 
+            // We should NOT use fallback analysis for validation failures.
+            if (status === 400) {
+                console.error(`❌ Validation failed for upload ${uploadId}: ${reason}`);
+                throw new Error(reason); // This will be caught by the outer catch and mark as failed
+            }
+
+            console.warn(`⚠️  AI service unavailable for upload ${uploadId}. Using fallback report. Reason: ${reason}`);
             analysis = buildFallbackAnalysis(type, reason);
         }
 
