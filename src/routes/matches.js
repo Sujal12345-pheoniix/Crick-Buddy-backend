@@ -141,57 +141,124 @@ async function ensureLiveFallbackMatch() {
     });
 }
 
+function mapRapidMatch(match) {
+    const info = match.matchInfo || {};
+    const score = match.matchScore || {};
+    const date = info.startDate ? new Date(parseInt(info.startDate)) : new Date();
+
+    const scoreLines = [];
+    if (score.team1Score) {
+        const s1 = score.team1Score.inngs1 || {};
+        scoreLines.push(`${info.team1?.teamSName || 'T1'}: ${s1.runs || 0}/${s1.wickets || 0} (${s1.overs || 0})`);
+    }
+    if (score.team2Score) {
+        const s2 = score.team2Score.inngs1 || {};
+        scoreLines.push(`${info.team2?.teamSName || 'T2'}: ${s2.runs || 0}/${s2.wickets || 0} (${s2.overs || 0})`);
+    }
+
+    return {
+        externalId: info.matchId ? String(info.matchId) : null,
+        source: 'rapidapi-cricbuzz',
+        title: `${info.team1?.teamName} vs ${info.team2?.teamName} (${info.matchDesc || 'Match'})`,
+        date,
+        location: info.venueInfo ? `${info.venueInfo.ground}, ${info.venueInfo.city}` : 'International Venue',
+        status: normalizeStatus({ status: info.status || '', matchStarted: !!score.team1Score }),
+        scoreData: scoreLines.length ? scoreLines.map(line => ({ inning: line })) : [{ status: info.status || 'Upcoming' }]
+    };
+}
+
 async function syncMatchesFromExternal() {
-    const apiKey = process.env.CRIC_API_KEY;
-    if (!apiKey || apiKey === 'dummy_cric_api_key') return;
+    const rapidKey = process.env.RAPID_AI;
+    const cricKey = process.env.CRIC_API_KEY;
+
+    if (!rapidKey && (!cricKey || cricKey === 'dummy_cric_api_key')) return;
 
     const now = Date.now();
-    // For better live-score accuracy, refresh more frequently when there are live matches.
     const liveCount = await prisma.match.count({ where: { status: 'live' } }).catch(() => 0);
-    const minIntervalMs = liveCount > 0 ? 30 * 1000 : 5 * 60 * 1000;
+    const minIntervalMs = liveCount > 0 ? 25 * 1000 : 4 * 60 * 1000;
     if (now - lastExternalSyncAt < minIntervalMs) return;
     lastExternalSyncAt = now;
 
-    const response = await axios.get('https://api.cricapi.com/v1/currentMatches', {
-        params: { apikey: apiKey, offset: 0 },
-        timeout: 15000
-    });
+    let incoming = [];
 
-    const incoming = (response.data?.data || []).map(mapExternalMatch);
+    // Try RapidAPI Cricbuzz first if key exists
+    if (rapidKey && rapidKey !== 'dummy') {
+        try {
+            console.log('Syncing from RapidAPI Cricbuzz...');
+            const response = await axios.get('https://cricbuzz-cricket.p.rapidapi.com/matches/v1/live', {
+                headers: {
+                    'x-rapidapi-key': rapidKey,
+                    'x-rapidapi-host': 'cricbuzz-cricket.p.rapidapi.com'
+                },
+                timeout: 10000
+            });
+
+            // Cricbuzz returns matches in nested typeMatches -> seriesMatches -> seriesAdWrapper -> matches
+            const typeMatches = response.data?.typeMatches || [];
+            for (const type of typeMatches) {
+                for (const series of (type.seriesMatches || [])) {
+                    if (series.seriesAdWrapper && series.seriesAdWrapper.matches) {
+                        for (const m of series.seriesAdWrapper.matches) {
+                            incoming.push(mapRapidMatch(m));
+                        }
+                    }
+                }
+            }
+            console.log(`RapidAPI: Found ${incoming.length} live/recent matches`);
+        } catch (err) {
+            console.warn('RapidAPI Cricbuzz sync failed:', err.message);
+        }
+    }
+
+    // Fallback or secondary sync from CricAPI if configured and incoming is still low
+    if (incoming.length < 5 && cricKey && cricKey !== 'dummy_cric_api_key') {
+        try {
+            console.log('Syncing from CricAPI...');
+            const response = await axios.get('https://api.cricapi.com/v1/currentMatches', {
+                params: { apikey: cricKey, offset: 0 },
+                timeout: 10000
+            });
+            const cricMatches = (response.data?.data || []).map(mapExternalMatch);
+            incoming = [...incoming, ...cricMatches];
+        } catch (err) {
+            console.warn('CricAPI sync failed:', err.message);
+        }
+    }
+
     if (!incoming.length) return;
 
     for (const m of incoming) {
-        let row = null;
-        if (m.externalId) {
-            row = await prisma.match.findFirst({
-                where: { externalId: m.externalId, source: 'cricapi' }
-            });
-        }
-        if (!row) {
-            const t = new Date(m.date).getTime();
-            const winStart = new Date(t - 36 * 60 * 60 * 1000);
-            const winEnd = new Date(t + 36 * 60 * 60 * 1000);
-            row = await prisma.match.findFirst({
-                where: {
-                    title: m.title,
-                    date: { gte: winStart, lte: winEnd }
-                }
-            });
-        }
+        if (!m.externalId) continue;
+
+        const row = await prisma.match.findFirst({
+            where: { externalId: m.externalId, source: m.source }
+        });
 
         if (row) {
             await prisma.match.update({
                 where: { id: row.id },
                 data: {
-                    externalId: m.externalId || row.externalId,
-                    source: m.source || row.source,
                     status: m.status,
                     scoreData: m.scoreData,
-                    location: m.location || row.location
+                    location: m.location || row.location,
+                    date: m.date || row.date
                 }
             });
         } else {
-            await prisma.match.create({ data: m });
+            // Check for title/date similarity to avoid duplicates from different sources
+            const t = new Date(m.date).getTime();
+            const winStart = new Date(t - 12 * 60 * 60 * 1000);
+            const winEnd = new Date(t + 12 * 60 * 60 * 1000);
+            const duplicate = await prisma.match.findFirst({
+                where: {
+                    title: { contains: m.title.split(' vs ')[0] },
+                    date: { gte: winStart, lte: winEnd }
+                }
+            });
+
+            if (!duplicate) {
+                await prisma.match.create({ data: m });
+            }
         }
     }
 }
