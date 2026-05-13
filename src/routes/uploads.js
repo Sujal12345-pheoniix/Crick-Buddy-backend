@@ -43,28 +43,12 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             });
         }
 
-        // ── Upload buffer to Cloudinary ────────────────────────────────────
+        // multer-storage-cloudinary has already uploaded the file.
+        // req.file.path contains the secure URL.
+        const fileUrl = req.file.path;
+        
         const isVideo = req.file.mimetype.startsWith('video/') ||
             VIDEO_EXTENSIONS.has(path.extname(req.file.originalname).toLowerCase());
-
-        let fileUrl = null;
-        let cloudinaryPublicId = null;
-
-        try {
-            const cloudResult = await uploadBuffer(req.file.buffer, {
-                folder: `crickbuddy/${type}`,
-                resource_type: isVideo ? 'video' : 'image',
-            });
-            fileUrl = cloudResult.url;
-            cloudinaryPublicId = cloudResult.publicId;
-            console.log(`✅ Cloudinary upload success: ${fileUrl}`);
-        } catch (cloudErr) {
-            console.error('❌ Cloudinary upload failed:', cloudErr.message);
-            return res.status(502).json({
-                success: false,
-                message: `Cloud storage upload failed: ${cloudErr.message}. Check CLOUDINARY env vars.`
-            });
-        }
 
         const ext = path.extname(req.file.originalname) || (isVideo ? '.mp4' : '.jpg');
         const uniqueFilename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
@@ -76,7 +60,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
                 filename: uniqueFilename,
                 originalName: req.file.originalname,
                 mimeType: req.file.mimetype,
-                fileSize: req.file.size,
+                fileSize: req.file.size || 0,
                 fileUrl,             // Real Cloudinary HTTPS URL
                 status: 'pending',
                 notes: notes || null
@@ -88,12 +72,11 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             data: { totalUploads: { increment: 1 } }
         });
 
-        // ── Queue AI analysis — pass Cloudinary URL (not buffer) ──────────
+        // ── Queue AI analysis — pass Cloudinary URL ──────────
         const { enqueueAnalysis } = require('../utils/queue');
         const enqueueResult = await enqueueAnalysis({
             uploadId: uploadDoc.id,
             fileUrl,                        // Cloudinary URL for AI service to download
-            fileBuffer: req.file.buffer,    // Buffer still available for direct processing
             fileName: req.file.originalname,
             mimeType: req.file.mimetype,
             type,

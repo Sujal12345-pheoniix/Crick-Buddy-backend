@@ -214,23 +214,20 @@ async function processJob(job) {
         const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
         const endpoint = `${aiUrl}/analyze/${type}`;
 
-        // Reconstruct Buffer: prefer in-memory buffer, fall back to downloading from Cloudinary URL
-        let fileBuffer;
+        const formData = new FormData();
+        
         if (rawBuffer) {
-            fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+            const fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+            formData.append('file', fileBuffer, {
+                filename: fileName || `upload.${type === 'posture' ? 'jpg' : 'mp4'}`,
+                contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
+            });
         } else if (fileUrl && fileUrl.startsWith('https://')) {
-            console.log(`📥 Downloading file from Cloudinary for upload ${uploadId}: ${fileUrl}`);
-            fileBuffer = await downloadBuffer(fileUrl);
+            formData.append('fileUrl', fileUrl);
         } else {
             throw new Error('No file buffer and no cloud URL available. Re-upload the file to retry.');
         }
-
-        const formData = new FormData();
-        // Append buffer directly — no filesystem dependency
-        formData.append('file', fileBuffer, {
-            filename: fileName || `upload.${type === 'posture' ? 'jpg' : 'mp4'}`,
-            contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
-        });
+        
         formData.append('upload_id', uploadId);
 
         await prisma.upload.update({
