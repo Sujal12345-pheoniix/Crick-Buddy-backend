@@ -252,14 +252,8 @@ async function processJob(job) {
                 aiErr.response?.data?.message ||
                 aiErr.message;
             
-            // 400 = validation failure (wrong video/image). Do NOT use fallback.
-            if (status === 400) {
-                console.error(`❌ Validation failed for upload ${uploadId}: ${reason}`);
-                throw new Error(reason);
-            }
-
-            console.warn(`⚠️  AI service unavailable for upload ${uploadId}. Using fallback report. Reason: ${reason}`);
-            analysis = buildFallbackAnalysis(type, reason);
+            console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
+            throw new Error(reason);
         }
 
         analysis = normalizeAnalysis(type, analysis);
