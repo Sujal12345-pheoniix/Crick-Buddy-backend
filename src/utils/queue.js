@@ -3,7 +3,6 @@ const IORedis = require('ioredis');
 const prisma = require('./prisma');
 const axios = require('axios');
 const FormData = require('form-data');
-const fs = require('fs');
 
 // ─── Redis Connection ──────────────────────────────────────────────────────
 let connection = null;
@@ -196,8 +195,9 @@ function getRedisConnection() {
 }
 
 // ─── Worker Job Handler ─────────────────────────────────────────────────────
+// NOTE: fileBuffer is a Buffer object serialized as an array in the job data.
 async function processJob(job) {
-    const { uploadId, filePath, type, userId } = job.data;
+    const { uploadId, fileBuffer: rawBuffer, fileName, mimeType, type, userId } = job.data;
 
     try {
         await prisma.upload.update({
@@ -208,8 +208,15 @@ async function processJob(job) {
         const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
         const endpoint = `${aiUrl}/analyze/${type}`;
 
+        // Reconstruct Buffer from job data (BullMQ serializes Buffers as arrays)
+        const fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+
         const formData = new FormData();
-        formData.append('file', fs.createReadStream(filePath));
+        // Append buffer directly — no filesystem dependency
+        formData.append('file', fileBuffer, {
+            filename: fileName || `upload.${type === 'posture' ? 'jpg' : 'mp4'}`,
+            contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
+        });
         formData.append('upload_id', uploadId);
 
         await prisma.upload.update({
@@ -221,7 +228,9 @@ async function processJob(job) {
         try {
             const response = await axios.post(endpoint, formData, {
                 headers: formData.getHeaders(),
-                timeout: 300000 // 5 min
+                timeout: 300000, // 5 min
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
             });
             analysis = response.data;
         } catch (aiErr) {
@@ -232,11 +241,10 @@ async function processJob(job) {
                 aiErr.response?.data?.message ||
                 aiErr.message;
             
-            // If it's a 400 error, it's a validation failure (e.g. wrong video). 
-            // We should NOT use fallback analysis for validation failures.
+            // 400 = validation failure (wrong video/image). Do NOT use fallback.
             if (status === 400) {
                 console.error(`❌ Validation failed for upload ${uploadId}: ${reason}`);
-                throw new Error(reason); // This will be caught by the outer catch and mark as failed
+                throw new Error(reason);
             }
 
             console.warn(`⚠️  AI service unavailable for upload ${uploadId}. Using fallback report. Reason: ${reason}`);
@@ -255,49 +263,49 @@ async function processJob(job) {
         });
 
         const reportPayload = {
-                uploadId,
-                userId,
-                type,
-                stanceScore: analysis.batting_metrics?.stanceScore ?? null,
-                batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
-                headPosition: analysis.batting_metrics?.headPosition ?? null,
-                headPositionScore: analysis.batting_metrics?.headPositionScore ?? null,
-                timingScore: analysis.batting_metrics?.timingScore ?? null,
-                followThroughScore: analysis.batting_metrics?.followThroughScore ?? null,
-                shotType: analysis.batting_metrics?.shotType ?? null,
-                overallBattingScore: analysis.batting_metrics?.overallBattingScore ?? null,
-                
-                // Bowling Metrics
-                wristPositionScore: analysis.bowling_metrics?.wristPositionScore ?? null,
-                wristPositionNote: analysis.bowling_metrics?.wristPositionNote ?? null,
-                armRotationAngle: analysis.bowling_metrics?.armRotationAngle ?? null,
-                armRotationScore: analysis.bowling_metrics?.armRotationScore ?? null,
-                releasePointScore: analysis.bowling_metrics?.releasePointScore ?? null,
-                releasePointNote: analysis.bowling_metrics?.releasePointNote ?? null,
-                estimatedBallSpeed: analysis.bowling_metrics?.estimatedBallSpeed ?? null,
-                balanceScoreBowling: analysis.bowling_metrics?.balanceScore ?? null,
-                bowlingStyle: analysis.bowling_metrics?.bowlingStyle ?? null,
-                overallBowlingScore: analysis.bowling_metrics?.overallBowlingScore ?? null,
+            uploadId,
+            userId,
+            type,
+            stanceScore: analysis.batting_metrics?.stanceScore ?? null,
+            batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
+            headPosition: analysis.batting_metrics?.headPosition ?? null,
+            headPositionScore: analysis.batting_metrics?.headPositionScore ?? null,
+            timingScore: analysis.batting_metrics?.timingScore ?? null,
+            followThroughScore: analysis.batting_metrics?.followThroughScore ?? null,
+            shotType: analysis.batting_metrics?.shotType ?? null,
+            overallBattingScore: analysis.batting_metrics?.overallBattingScore ?? null,
+            
+            // Bowling Metrics
+            wristPositionScore: analysis.bowling_metrics?.wristPositionScore ?? null,
+            wristPositionNote: analysis.bowling_metrics?.wristPositionNote ?? null,
+            armRotationAngle: analysis.bowling_metrics?.armRotationAngle ?? null,
+            armRotationScore: analysis.bowling_metrics?.armRotationScore ?? null,
+            releasePointScore: analysis.bowling_metrics?.releasePointScore ?? null,
+            releasePointNote: analysis.bowling_metrics?.releasePointNote ?? null,
+            estimatedBallSpeed: analysis.bowling_metrics?.estimatedBallSpeed ?? null,
+            balanceScoreBowling: analysis.bowling_metrics?.balanceScore ?? null,
+            bowlingStyle: analysis.bowling_metrics?.bowlingStyle ?? null,
+            overallBowlingScore: analysis.bowling_metrics?.overallBowlingScore ?? null,
 
-                // Posture Metrics
-                shoulderAlignmentScore: analysis.posture_metrics?.shoulderAlignmentScore ?? null,
-                shoulderAlignmentNote: analysis.posture_metrics?.shoulderAlignmentNote ?? null,
-                kneeBendAngle: analysis.posture_metrics?.kneeBendAngle ?? null,
-                kneeBendScore: analysis.posture_metrics?.kneeBendScore ?? null,
-                balanceScorePosture: analysis.posture_metrics?.balanceScore ?? null,
-                spinePosScore: analysis.posture_metrics?.spinePosScore ?? null,
-                overallPostureScore: analysis.posture_metrics?.overallPostureScore ?? null,
+            // Posture Metrics
+            shoulderAlignmentScore: analysis.posture_metrics?.shoulderAlignmentScore ?? null,
+            shoulderAlignmentNote: analysis.posture_metrics?.shoulderAlignmentNote ?? null,
+            kneeBendAngle: analysis.posture_metrics?.kneeBendAngle ?? null,
+            kneeBendScore: analysis.posture_metrics?.kneeBendScore ?? null,
+            balanceScorePosture: analysis.posture_metrics?.balanceScore ?? null,
+            spinePosScore: analysis.posture_metrics?.spinePosScore ?? null,
+            overallPostureScore: analysis.posture_metrics?.overallPostureScore ?? null,
 
-                // AI Report (JSON arrays)
-                strengths: analysis.strengths || [],
-                weaknesses: analysis.weaknesses || [],
-                mistakes: analysis.mistakes || [],
-                improvementSuggestions: analysis.improvement_suggestions || [],
-                trainingDrills: analysis.training_drills || [],
-                recommendations: analysis.recommendations || [],
-                bestPractices: analysis.best_practices || [],
-                overallScore: analysis.overall_score ?? 0,
-                landmarks: analysis.landmarks ?? null
+            // AI Report (JSON arrays)
+            strengths: analysis.strengths || [],
+            weaknesses: analysis.weaknesses || [],
+            mistakes: analysis.mistakes || [],
+            improvementSuggestions: analysis.improvement_suggestions || [],
+            trainingDrills: analysis.training_drills || [],
+            recommendations: analysis.recommendations || [],
+            bestPractices: analysis.best_practices || [],
+            overallScore: analysis.overall_score ?? 0,
+            landmarks: analysis.landmarks ?? null
         };
 
         const report = existingReport
@@ -389,7 +397,7 @@ function initQueue() {
         analysisQueue = new Queue('video-analysis', { connection: conn });
         analysisWorker = new Worker('video-analysis', processJob, {
             connection: conn,
-            concurrency: 3
+            concurrency: 2
         });
 
         analysisWorker.on('completed', (job) => {
@@ -415,18 +423,18 @@ if (isQueueEnabled()) {
     console.log('ℹ️  Analysis queue disabled (ENABLE_ANALYSIS_QUEUE!=true). Using direct processing mode.');
 }
 
-// ─── Fallback: direct processing without queue (when Redis is unavailable) ──
-async function processDirectly(uploadId, filePath, type, userId) {
-    return processJob({ data: { uploadId, filePath, type, userId } });
+// ─── Fallback: direct processing without queue ───────────────────────────────
+async function processDirectly(uploadId, fileBuffer, fileName, mimeType, type, userId) {
+    return processJob({ data: { uploadId, fileBuffer, fileName, mimeType, type, userId } });
 }
 
-// ─── Exported enqueue function ──────────────────────────────────────────────
+// ─── Exported enqueue function ───────────────────────────────────────────────
 async function enqueueAnalysis(data) {
     const queueEnabled = isQueueEnabled();
 
     if (!queueEnabled) {
         console.warn(`⚠️  Queue disabled. Processing directly for upload: ${data.uploadId}`);
-        processDirectly(data.uploadId, data.filePath, data.type, data.userId).catch(err => {
+        processDirectly(data.uploadId, data.fileBuffer, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
             console.error('❌ Direct analysis fatal error:', err.message);
         });
         return { success: true, processed: 'directly' };
@@ -448,9 +456,7 @@ async function enqueueAnalysis(data) {
     // Fallback: run directly in the same process (no Redis)
     console.warn(`⚠️  Processing directly (Queue Offline) for upload: ${data.uploadId}`);
     try {
-        // Execute in background so it doesn't block the request response too long,
-        // though it still uses server resources.
-        processDirectly(data.uploadId, data.filePath, data.type, data.userId).catch(err => {
+        processDirectly(data.uploadId, data.fileBuffer, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
             console.error('❌ Direct analysis fatal error:', err.message);
         });
         return { success: true, processed: 'directly' };

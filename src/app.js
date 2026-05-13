@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const path = require('path');
+
 
 const authRoutes = require('./routes/auth');
 const uploadRoutes = require('./routes/uploads');
@@ -21,30 +21,41 @@ const app = express();
 // ✅ Security & middleware
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-const allowedOrigins = [
-  "https://crickbuddy.tech",
-  "https://www.crickbuddy.tech",
-  "https://crick-buddy-frontend.vercel.app",
-  "http://localhost:3000"
-];
+// Build CORS origin list from environment variable + hardcoded known-safe domains
+const _envOrigins = (process.env.FRONTEND_URL || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+const allowedOrigins = [...new Set([
+    "https://crickbuddy.tech",
+    "https://www.crickbuddy.tech",
+    "https://crick-buddy-frontend.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    ..._envOrigins,
+])];
 
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
-  credentials: true
+    origin: function (origin, callback) {
+        // Allow requests with no origin (mobile apps, curl, Render internal)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`CORS blocked: ${origin}`);
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
 
-app.use(morgan('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// ✅ Static files (uploads)
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+app.use(morgan('dev'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 
 // =========================
 // ✅ ROOT ROUTE (IMPORTANT)

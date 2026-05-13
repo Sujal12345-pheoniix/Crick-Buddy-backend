@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const path = require('path');
-const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
 const prisma = require('../utils/prisma');
@@ -25,10 +24,6 @@ function matchesExpectedMedia(type, file) {
     return { valid: looksLikeVideo, expected: 'video/* (mp4/mov/avi/mkv/webm)' };
 }
 
-// Ensure uploads folder exists
-const uploadsDir = path.join(__dirname, '..', '..', 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
 // POST /api/uploads — Upload a file and trigger AI analysis
 router.post('/', protect, upload.single('file'), async (req, res) => {
     try {
@@ -43,24 +38,22 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
 
         const mediaCheck = matchesExpectedMedia(type, req.file);
         if (!mediaCheck.valid) {
-            try {
-                fs.unlinkSync(req.file.path);
-            } catch (_) {
-                // ignore cleanup failures for invalid files
-            }
             return res.status(400).json({
                 success: false,
                 message: `Invalid file for ${type} analysis. Expected ${mediaCheck.expected}.`
             });
         }
 
-        const fileUrl = `/uploads/${req.file.filename}`;
+        // Generate a unique filename for DB reference (no actual file stored on disk)
+        const ext = path.extname(req.file.originalname) || (type === 'posture' ? '.jpg' : '.mp4');
+        const uniqueFilename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+        const fileUrl = `/uploads/${uniqueFilename}`; // logical reference only
 
         const uploadDoc = await prisma.upload.create({
             data: {
                 userId: req.user.id,
                 type,
-                filename: req.file.filename,
+                filename: uniqueFilename,
                 originalName: req.file.originalname,
                 mimeType: req.file.mimetype,
                 fileSize: req.file.size,
@@ -75,11 +68,13 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             data: { totalUploads: { increment: 1 } }
         });
 
-        // Trigger AI analysis asynchronously via BullMQ Redis Queue (falls back to direct if Redis is down)
+        // Trigger AI analysis asynchronously — pass buffer, not filePath
         const { enqueueAnalysis } = require('../utils/queue');
         const enqueueResult = await enqueueAnalysis({
             uploadId: uploadDoc.id,
-            filePath: req.file.path,
+            fileBuffer: req.file.buffer,           // In-memory bytes from multer memoryStorage
+            fileName: req.file.originalname,
+            mimeType: req.file.mimetype,
             type,
             userId: req.user.id
         });
@@ -126,6 +121,8 @@ router.get('/:id', protect, async (req, res) => {
 });
 
 // POST /api/uploads/:id/retry — Retry analysis for an existing upload
+// NOTE: In memory-storage mode we cannot retry from the original file (it was never stored).
+// The retry endpoint will return a clear message directing the user to re-upload.
 router.post('/:id/retry', protect, async (req, res) => {
     try {
         const uploadDoc = await prisma.upload.findFirst({
@@ -136,51 +133,13 @@ router.post('/:id/retry', protect, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Upload not found' });
         }
 
-        const filePath = path.join(uploadsDir, uploadDoc.filename);
-        if (!fs.existsSync(filePath)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Upload file is missing on server. Re-upload is required.'
-            });
-        }
-
-        await prisma.upload.update({
-            where: { id: uploadDoc.id },
-            data: {
-                status: 'pending',
-                processingProgress: 0,
-                errorMessage: null
-            }
-        });
-
-        const { enqueueAnalysis } = require('../utils/queue');
-        const enqueueResult = await enqueueAnalysis({
-            uploadId: uploadDoc.id,
-            filePath,
-            type: uploadDoc.type,
-            userId: req.user.id
-        });
-
-        if (!enqueueResult) {
-            throw new Error('Analysis retry queue did not accept the job');
-        }
-
-        return res.json({
-            success: true,
-            message: 'Analysis retry started',
-            upload: {
-                ...uploadDoc,
-                status: 'pending',
-                processingProgress: 0,
-                errorMessage: null
-            }
+        // With memory storage, original file bytes are no longer available after the initial request.
+        // User must re-upload the file to retry analysis.
+        return res.status(400).json({
+            success: false,
+            message: 'Retry not supported in this deployment mode. Please re-upload your file to run a new analysis.'
         });
     } catch (err) {
-        await prisma.upload.update({
-            where: { id: req.params.id },
-            data: { status: 'failed', errorMessage: err.message }
-        }).catch(() => {});
-
         return res.status(500).json({ success: false, message: err.message });
     }
 });

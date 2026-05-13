@@ -1,16 +1,9 @@
 const multer = require('multer');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, path.join(__dirname, '..', '..', 'uploads'));
-    },
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        cb(null, `${uuidv4()}${ext}`);
-    }
-});
+// Use memory storage — production-safe, no filesystem dependency.
+// File bytes are held in req.file.buffer and streamed directly to AI service.
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
     const allowed = /mp4|mov|avi|mkv|webm|jpg|jpeg|png|gif|webp/;
