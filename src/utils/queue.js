@@ -4,6 +4,12 @@ const prisma = require('./prisma');
 const axios = require('axios');
 const FormData = require('form-data');
 
+// Download a file from a URL into a Buffer (used for Cloudinary-stored retries)
+async function downloadBuffer(url) {
+    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
+    return Buffer.from(response.data);
+}
+
 // ─── Redis Connection ──────────────────────────────────────────────────────
 let connection = null;
 let analysisQueue = null;
@@ -195,9 +201,9 @@ function getRedisConnection() {
 }
 
 // ─── Worker Job Handler ─────────────────────────────────────────────────────
-// NOTE: fileBuffer is a Buffer object serialized as an array in the job data.
+// Supports both in-memory buffer (initial upload) and Cloudinary URL (retry).
 async function processJob(job) {
-    const { uploadId, fileBuffer: rawBuffer, fileName, mimeType, type, userId } = job.data;
+    const { uploadId, fileBuffer: rawBuffer, fileUrl, fileName, mimeType, type, userId } = job.data;
 
     try {
         await prisma.upload.update({
@@ -208,8 +214,16 @@ async function processJob(job) {
         const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
         const endpoint = `${aiUrl}/analyze/${type}`;
 
-        // Reconstruct Buffer from job data (BullMQ serializes Buffers as arrays)
-        const fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+        // Reconstruct Buffer: prefer in-memory buffer, fall back to downloading from Cloudinary URL
+        let fileBuffer;
+        if (rawBuffer) {
+            fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
+        } else if (fileUrl && fileUrl.startsWith('https://')) {
+            console.log(`📥 Downloading file from Cloudinary for upload ${uploadId}: ${fileUrl}`);
+            fileBuffer = await downloadBuffer(fileUrl);
+        } else {
+            throw new Error('No file buffer and no cloud URL available. Re-upload the file to retry.');
+        }
 
         const formData = new FormData();
         // Append buffer directly — no filesystem dependency
@@ -424,8 +438,8 @@ if (isQueueEnabled()) {
 }
 
 // ─── Fallback: direct processing without queue ───────────────────────────────
-async function processDirectly(uploadId, fileBuffer, fileName, mimeType, type, userId) {
-    return processJob({ data: { uploadId, fileBuffer, fileName, mimeType, type, userId } });
+async function processDirectly(uploadId, fileBuffer, fileUrl, fileName, mimeType, type, userId) {
+    return processJob({ data: { uploadId, fileBuffer, fileUrl, fileName, mimeType, type, userId } });
 }
 
 // ─── Exported enqueue function ───────────────────────────────────────────────
@@ -434,7 +448,7 @@ async function enqueueAnalysis(data) {
 
     if (!queueEnabled) {
         console.warn(`⚠️  Queue disabled. Processing directly for upload: ${data.uploadId}`);
-        processDirectly(data.uploadId, data.fileBuffer, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
+        processDirectly(data.uploadId, data.fileBuffer, data.fileUrl, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
             console.error('❌ Direct analysis fatal error:', err.message);
         });
         return { success: true, processed: 'directly' };
@@ -456,7 +470,7 @@ async function enqueueAnalysis(data) {
     // Fallback: run directly in the same process (no Redis)
     console.warn(`⚠️  Processing directly (Queue Offline) for upload: ${data.uploadId}`);
     try {
-        processDirectly(data.uploadId, data.fileBuffer, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
+        processDirectly(data.uploadId, data.fileBuffer, data.fileUrl, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
             console.error('❌ Direct analysis fatal error:', err.message);
         });
         return { success: true, processed: 'directly' };

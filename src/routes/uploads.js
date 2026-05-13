@@ -1,11 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const path = require('path');
-const axios = require('axios');
-const FormData = require('form-data');
 const prisma = require('../utils/prisma');
 const upload = require('../config/multer');
 const { protect } = require('../middleware/auth');
+const { uploadBuffer, deleteFile } = require('../config/cloudinary');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
@@ -24,7 +23,7 @@ function matchesExpectedMedia(type, file) {
     return { valid: looksLikeVideo, expected: 'video/* (mp4/mov/avi/mkv/webm)' };
 }
 
-// POST /api/uploads — Upload a file and trigger AI analysis
+// ─── POST /api/uploads — Upload to Cloudinary then queue AI analysis ──────────
 router.post('/', protect, upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -44,10 +43,31 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             });
         }
 
-        // Generate a unique filename for DB reference (no actual file stored on disk)
-        const ext = path.extname(req.file.originalname) || (type === 'posture' ? '.jpg' : '.mp4');
+        // ── Upload buffer to Cloudinary ────────────────────────────────────
+        const isVideo = req.file.mimetype.startsWith('video/') ||
+            VIDEO_EXTENSIONS.has(path.extname(req.file.originalname).toLowerCase());
+
+        let fileUrl = null;
+        let cloudinaryPublicId = null;
+
+        try {
+            const cloudResult = await uploadBuffer(req.file.buffer, {
+                folder: `crickbuddy/${type}`,
+                resource_type: isVideo ? 'video' : 'image',
+            });
+            fileUrl = cloudResult.url;
+            cloudinaryPublicId = cloudResult.publicId;
+            console.log(`✅ Cloudinary upload success: ${fileUrl}`);
+        } catch (cloudErr) {
+            console.error('❌ Cloudinary upload failed:', cloudErr.message);
+            return res.status(502).json({
+                success: false,
+                message: `Cloud storage upload failed: ${cloudErr.message}. Check CLOUDINARY env vars.`
+            });
+        }
+
+        const ext = path.extname(req.file.originalname) || (isVideo ? '.mp4' : '.jpg');
         const uniqueFilename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
-        const fileUrl = `/uploads/${uniqueFilename}`; // logical reference only
 
         const uploadDoc = await prisma.upload.create({
             data: {
@@ -57,7 +77,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
                 originalName: req.file.originalname,
                 mimeType: req.file.mimetype,
                 fileSize: req.file.size,
-                fileUrl,
+                fileUrl,             // Real Cloudinary HTTPS URL
                 status: 'pending',
                 notes: notes || null
             }
@@ -68,11 +88,12 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             data: { totalUploads: { increment: 1 } }
         });
 
-        // Trigger AI analysis asynchronously — pass buffer, not filePath
+        // ── Queue AI analysis — pass Cloudinary URL (not buffer) ──────────
         const { enqueueAnalysis } = require('../utils/queue');
         const enqueueResult = await enqueueAnalysis({
             uploadId: uploadDoc.id,
-            fileBuffer: req.file.buffer,           // In-memory bytes from multer memoryStorage
+            fileUrl,                        // Cloudinary URL for AI service to download
+            fileBuffer: req.file.buffer,    // Buffer still available for direct processing
             fileName: req.file.originalname,
             mimeType: req.file.mimetype,
             type,
@@ -85,18 +106,19 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
 
         res.status(201).json({
             success: true,
-            message: 'File uploaded successfully. Analysis queued.',
+            message: 'File uploaded to cloud storage. Analysis queued.',
             upload: uploadDoc
         });
     } catch (err) {
+        console.error('❌ Upload route error:', err.message);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// GET /api/uploads — List user's uploads
+// ─── GET /api/uploads — List user's uploads ───────────────────────────────────
 router.get('/', protect, async (req, res) => {
     try {
-        const uploads = await prisma.upload.findMany({ 
+        const uploads = await prisma.upload.findMany({
             where: { userId: req.user.id },
             orderBy: { createdAt: 'desc' },
             take: 50
@@ -107,10 +129,10 @@ router.get('/', protect, async (req, res) => {
     }
 });
 
-// GET /api/uploads/:id — Get single upload with status
+// ─── GET /api/uploads/:id — Get single upload with status ─────────────────────
 router.get('/:id', protect, async (req, res) => {
     try {
-        const uploadDoc = await prisma.upload.findFirst({ 
+        const uploadDoc = await prisma.upload.findFirst({
             where: { id: req.params.id, userId: req.user.id }
         });
         if (!uploadDoc) return res.status(404).json({ success: false, message: 'Upload not found' });
@@ -120,9 +142,7 @@ router.get('/:id', protect, async (req, res) => {
     }
 });
 
-// POST /api/uploads/:id/retry — Retry analysis for an existing upload
-// NOTE: In memory-storage mode we cannot retry from the original file (it was never stored).
-// The retry endpoint will return a clear message directing the user to re-upload.
+// ─── POST /api/uploads/:id/retry — Retry analysis using Cloudinary URL ────────
 router.post('/:id/retry', protect, async (req, res) => {
     try {
         const uploadDoc = await prisma.upload.findFirst({
@@ -133,11 +153,32 @@ router.post('/:id/retry', protect, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Upload not found' });
         }
 
-        // With memory storage, original file bytes are no longer available after the initial request.
-        // User must re-upload the file to retry analysis.
-        return res.status(400).json({
-            success: false,
-            message: 'Retry not supported in this deployment mode. Please re-upload your file to run a new analysis.'
+        if (!uploadDoc.fileUrl || !uploadDoc.fileUrl.startsWith('https://')) {
+            return res.status(400).json({
+                success: false,
+                message: 'No cloud URL available for this upload. Please re-upload the file.'
+            });
+        }
+
+        // Reset status to pending before retry
+        await prisma.upload.update({
+            where: { id: uploadDoc.id },
+            data: { status: 'pending', processingProgress: 0, errorMessage: null }
+        });
+
+        const { enqueueAnalysis } = require('../utils/queue');
+        await enqueueAnalysis({
+            uploadId: uploadDoc.id,
+            fileUrl: uploadDoc.fileUrl,   // Download from Cloudinary on retry
+            fileName: uploadDoc.originalName,
+            mimeType: uploadDoc.mimeType,
+            type: uploadDoc.type,
+            userId: req.user.id
+        });
+
+        return res.json({
+            success: true,
+            message: 'Analysis retry queued using stored cloud file.'
         });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
