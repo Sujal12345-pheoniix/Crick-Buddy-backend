@@ -279,7 +279,7 @@ router.post('/match-performance', protect, async (req, res) => {
 
         let feedback = generateGrowthFeedback(scores, previousComputed);
         try {
-            const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+            const aiUrl = process.env.AI_SERVICE_URL;
             const aiResp = await axios.post(`${aiUrl}/match-growth`, {
                 latest: { matchDate, runs, balls, wickets, oversBowled, runsConceded, catches, stumpings, computed: scores },
                 previous: previousComputed ? { computed: previousComputed } : null,

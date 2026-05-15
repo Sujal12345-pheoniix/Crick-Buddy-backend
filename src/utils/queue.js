@@ -182,7 +182,7 @@ function buildFallbackAnalysis(type, reason = 'AI service unavailable') {
 function getRedisConnection() {
     if (connection) return connection;
 
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+    const redisUrl = process.env.REDIS_URL;
     connection = new IORedis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
@@ -211,7 +211,7 @@ async function processJob(job) {
             data: { status: 'processing', processingProgress: 10 }
         });
 
-        const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        const aiUrl = process.env.AI_SERVICE_URL;
         const endpoint = `${aiUrl}/analyze/${type}`;
 
         const formData = new FormData();

@@ -18,7 +18,7 @@ router.post('/', protect, async (req, res) => {
 
         // Try to forward to AI service
         try {
-            const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+            const aiUrl = process.env.AI_SERVICE_URL;
             const response = await axios.post(`${aiUrl}/chatbot`, {
                 message,
                 history,
