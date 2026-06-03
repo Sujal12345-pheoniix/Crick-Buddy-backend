@@ -239,21 +239,34 @@ async function processJob(job) {
         try {
             const response = await axios.post(endpoint, formData, {
                 headers: formData.getHeaders(),
-                timeout: 300000, // 5 min
+                timeout: 600000, // 10 min — enough for cold-start AI + full pipeline
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,
             });
             analysis = response.data;
         } catch (aiErr) {
-            const status = aiErr.response?.status;
-            const d = aiErr.response?.data?.detail;
-            const reason =
-                (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
-                aiErr.response?.data?.message ||
-                aiErr.message;
-            
-            console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
-            throw new Error(reason);
+            const isTimeout = (
+                aiErr.code === 'ECONNABORTED' ||
+                aiErr.code === 'ETIMEDOUT' ||
+                aiErr.code === 'ERR_CANCELED' ||
+                /timeout/i.test(aiErr.message || '')
+            );
+
+            if (isTimeout) {
+                // AI service is slow (cold start / large video) — use rule-based fallback
+                // so the user always gets a real report instead of a hard failure.
+                console.warn(`⚠️  AI service timed out for upload ${uploadId}. Using rule-based fallback analysis.`);
+                analysis = buildFallbackAnalysis(type, 'AI service response timed out — rule-based analysis applied');
+            } else {
+                const status = aiErr.response?.status;
+                const d = aiErr.response?.data?.detail;
+                const reason =
+                    (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
+                    aiErr.response?.data?.message ||
+                    aiErr.message;
+                console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
+                throw new Error(reason);
+            }
         }
 
         analysis = normalizeAnalysis(type, analysis);
@@ -399,10 +412,19 @@ async function processJob(job) {
 function initQueue() {
     try {
         const conn = getRedisConnection();
-        analysisQueue = new Queue('video-analysis', { connection: conn });
+        analysisQueue = new Queue('video-analysis', {
+            connection: conn,
+            defaultJobOptions: {
+                attempts: 2,
+                backoff: { type: 'exponential', delay: 8000 },
+                removeOnComplete: true,
+            }
+        });
         analysisWorker = new Worker('video-analysis', processJob, {
             connection: conn,
-            concurrency: 2
+            concurrency: 1,         // 1 at a time — prevents RAM overload on free tier
+            lockDuration: 660000,   // 11 min lock — longer than our 10-min axios timeout
+            lockRenewTime: 120000,  // Renew lock every 2 min to keep job alive
         });
 
         analysisWorker.on('completed', (job) => {
@@ -449,9 +471,10 @@ async function enqueueAnalysis(data) {
         if (analysisQueue) {
             console.log(`📡 Queuing analysis for upload: ${data.uploadId}`);
             return await analysisQueue.add('analyze-video', data, {
-                attempts: 3,
-                backoff: { type: 'exponential', delay: 5000 },
-                removeOnComplete: true
+                attempts: 2,
+                backoff: { type: 'exponential', delay: 8000 },
+                removeOnComplete: true,
+                removeOnFail: false,
             });
         }
     } catch (err) {
