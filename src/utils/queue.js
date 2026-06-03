@@ -179,14 +179,43 @@ function buildFallbackAnalysis(type, reason = 'AI service unavailable') {
     };
 }
 
+/**
+ * Resolve the Redis connection URL from multiple possible env sources.
+ * Priority:
+ *   1. REDIS_URL  (standard Redis connection string)
+ *   2. Auto-constructed from UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
+ *      (Upstash free tier exposes REST credentials — we convert them to IORedis format)
+ */
+function getRedisUrl() {
+    if (process.env.REDIS_URL) return process.env.REDIS_URL;
+
+    const restUrl   = process.env.UPSTASH_REDIS_REST_URL;
+    const restToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (restUrl && restToken) {
+        // Convert https://host.upstash.io → rediss://default:<token>@host.upstash.io:6380
+        const host = restUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        const url = `rediss://default:${restToken}@${host}:6380`;
+        console.log(`ℹ️  Redis URL auto-constructed from Upstash credentials (host: ${host})`);
+        return url;
+    }
+
+    return null;
+}
+
 function getRedisConnection() {
     if (connection) return connection;
 
-    const redisUrl = process.env.REDIS_URL;
+    const redisUrl = getRedisUrl();
+    if (!redisUrl) {
+        console.warn('⚠️  No Redis URL found (REDIS_URL or UPSTASH_* not set) — queue disabled');
+        return null;
+    }
+
     connection = new IORedis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
         lazyConnect: true,
+        tls: redisUrl.startsWith('rediss://') ? {} : undefined,
     });
 
     connection.on('error', (err) => {
@@ -412,6 +441,10 @@ async function processJob(job) {
 function initQueue() {
     try {
         const conn = getRedisConnection();
+        if (!conn) {
+            console.log('ℹ️  Queue skipped — no Redis URL configured. Using direct processing mode.');
+            return;
+        }
         analysisQueue = new Queue('video-analysis', {
             connection: conn,
             defaultJobOptions: {
