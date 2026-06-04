@@ -5,9 +5,98 @@ const axios = require('axios');
 const FormData = require('form-data');
 
 // Download a file from a URL into a Buffer (used for Cloudinary-stored retries)
-async function downloadBuffer(url) {
-    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
-    return Buffer.from(response.data);
+async function downloadBuffer(urlStr) {
+    console.log(`[CLOUDINARY:START] Fetching file bytes from URL: ${urlStr}`);
+    try {
+        const response = await axios.get(urlStr, { responseType: 'arraybuffer', timeout: 120000 });
+        console.log(`[CLOUDINARY:SUCCESS] Downloaded ${response.data.byteLength} bytes from Cloudinary`);
+        return Buffer.from(response.data);
+    } catch (err) {
+        console.error(`[CLOUDINARY:ERROR] Failed to download file from Cloudinary: ${err.message}`);
+        throw err;
+    }
+}
+
+const dns = require('dns').promises;
+const url = require('url');
+
+// Validates the AI_SERVICE_URL configuration
+async function validateAiServiceUrl(aiUrl) {
+    if (!aiUrl) {
+        throw new Error('AI_SERVICE_URL is not configured in environment variables.');
+    }
+    try {
+        const parsed = new url.URL(aiUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error(`Invalid protocol in AI_SERVICE_URL: ${parsed.protocol}`);
+        }
+        await dns.lookup(parsed.hostname);
+        return true;
+    } catch (err) {
+        throw new Error(`AI_SERVICE_URL DNS resolution / validation failed: ${err.message}`);
+    }
+}
+
+// Wrapper for Axios request to AI Service with 3 attempts and exponential backoff
+async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts = 3) {
+    const aiUrl = process.env.AI_SERVICE_URL;
+    
+    console.log(`[AI_REQUEST:START] Starting AI analysis for upload ${uploadId} to endpoint: ${endpoint}`);
+    
+    // Step 6: Validate AI_SERVICE_URL
+    await validateAiServiceUrl(aiUrl);
+
+    let lastError = null;
+    let delay = 2000; // start with 2 seconds
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            console.log(`[AI_REQUEST:ATTEMPT] Attempt ${attempt} of ${maxAttempts} to call AI service for upload ${uploadId}`);
+            
+            const startTime = Date.now();
+            const response = await axios.post(endpoint, formData, {
+                headers: formData.getHeaders(),
+                timeout: 300000, // 5 min timeout per attempt
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+            });
+            
+            const duration = Date.now() - startTime;
+            console.log(`[AI_RESPONSE:SUCCESS] Received response from AI service in ${duration}ms for upload ${uploadId}`);
+            
+            if (!response.data) {
+                throw new Error('AI service returned empty response');
+            }
+            
+            return response.data;
+        } catch (err) {
+            lastError = err;
+            
+            // Step 8: Detect error types
+            let errorType = 'UNKNOWN';
+            const status = err.response?.status;
+            
+            if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || /timeout/i.test(err.message || '')) {
+                errorType = 'TIMEOUT';
+            } else if (err.code === 'ECONNREFUSED') {
+                errorType = 'CONNECTION_REFUSED';
+            } else if (status === 502 || status === 503 || status === 504) {
+                errorType = 'SERVICE_SLEEPING_OR_BAD_GATEWAY';
+            } else if (status && status !== 200) {
+                errorType = 'INVALID_RESPONSE';
+            }
+            
+            console.warn(`[AI_REQUEST:FAIL] Attempt ${attempt} failed with ${errorType} for upload ${uploadId}. Error: ${err.message}`);
+            
+            if (attempt < maxAttempts) {
+                console.log(`[AI_REQUEST:RETRY] Retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2; // exponential backoff
+            }
+        }
+    }
+    
+    throw lastError;
 }
 
 // ─── Redis Connection ──────────────────────────────────────────────────────
@@ -266,13 +355,7 @@ async function processJob(job) {
 
         let analysis;
         try {
-            const response = await axios.post(endpoint, formData, {
-                headers: formData.getHeaders(),
-                timeout: 600000, // 10 min — enough for cold-start AI + full pipeline
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity,
-            });
-            analysis = response.data;
+            analysis = await callAiWithRetry(endpoint, formData, uploadId, type);
         } catch (aiErr) {
             const isTimeout = (
                 aiErr.code === 'ECONNABORTED' ||
@@ -288,13 +371,39 @@ async function processJob(job) {
                 analysis = buildFallbackAnalysis(type, 'AI service response timed out — rule-based analysis applied');
             } else {
                 const status = aiErr.response?.status;
-                const d = aiErr.response?.data?.detail;
-                const reason =
-                    (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
-                    aiErr.response?.data?.message ||
-                    aiErr.message;
-                console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
-                throw new Error(reason);
+                const isUnavailable = (
+                    aiErr.code === 'ECONNREFUSED' ||
+                    status === 502 ||
+                    status === 503 ||
+                    status === 504
+                );
+                
+                if (isUnavailable) {
+                    const friendlyMessage = 'AI analysis service is currently unavailable. Your upload has been saved and analysis will resume automatically.';
+                    console.log(`[DB_WRITE:INFO] AI Service unavailable for upload ${uploadId}. Setting status to pending. Message: "${friendlyMessage}"`);
+                    
+                    await prisma.upload.update({
+                        where: { id: uploadId },
+                        data: {
+                            status: 'pending',
+                            errorMessage: friendlyMessage,
+                            processingProgress: 0
+                        }
+                    }).catch((dbErr) => {
+                        console.error(`[DB_WRITE:ERROR] Failed to update upload status: ${dbErr.message}`);
+                    });
+                    
+                    // Exit gracefully without throwing error to the runner
+                    return { success: false, reason: 'AI service unavailable, status kept as pending' };
+                } else {
+                    const d = aiErr.response?.data?.detail;
+                    const reason =
+                        (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
+                        aiErr.response?.data?.message ||
+                        aiErr.message;
+                    console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
+                    throw new Error(reason);
+                }
             }
         }
 
@@ -362,6 +471,8 @@ async function processJob(job) {
             })
             : await prisma.analysisReport.create({ data: reportPayload });
 
+        console.log(`[DB_WRITE:INFO] ${existingReport ? 'Updated' : 'Created'} analysis report with ID ${report.id} for upload ${uploadId}`);
+
         try {
             const progressExists = await prisma.progressEntry.findFirst({
                 where: {
@@ -373,7 +484,7 @@ async function processJob(job) {
             });
 
             if (!progressExists) {
-                await prisma.progressEntry.create({
+                const newProgress = await prisma.progressEntry.create({
                     data: {
                         userId,
                         reportId: report.id,
@@ -390,6 +501,7 @@ async function processJob(job) {
                         overallScore: analysis.overall_score ?? 0,
                     }
                 });
+                console.log(`[DB_WRITE:INFO] Created progress entry with ID ${newProgress.id} for user ${userId}`);
             }
         } catch (progressErr) {
             console.warn(`⚠️  Progress entry update skipped for upload ${uploadId}: ${progressErr.message}`);
@@ -408,14 +520,16 @@ async function processJob(job) {
                     overallScore: Number(userStats._avg.overallScore || 0)
                 }
             });
+            console.log(`[DB_WRITE:INFO] Updated stats for user ${userId}: average overallScore = ${userStats._avg.overallScore}`);
         } catch (userErr) {
             console.warn(`⚠️  User aggregate update skipped for upload ${uploadId}: ${userErr.message}`);
         }
 
         await prisma.upload.update({
             where: { id: uploadId },
-            data: { status: 'completed', processingProgress: 100 }
+            data: { status: 'completed', processingProgress: 100, errorMessage: null }
         });
+        console.log(`[DB_WRITE:INFO] Updated upload ${uploadId} status to completed`);
 
         return { success: true, reportId: report.id };
     } catch (err) {
@@ -429,10 +543,27 @@ async function processJob(job) {
             }
         }
         console.error('❌ Job error processing video:', errorMessage);
+        
+        const isUnavailable = (
+            err.code === 'ECONNREFUSED' ||
+            err.response?.status === 502 ||
+            err.response?.status === 503 ||
+            err.response?.status === 504
+        );
+        
+        const status = isUnavailable ? 'pending' : 'failed';
+        const finalErrorMessage = isUnavailable 
+            ? 'AI analysis service is currently unavailable. Your upload has been saved and analysis will resume automatically.'
+            : String(errorMessage);
+            
+        console.log(`[DB_WRITE:INFO] AI Analysis fatal catch. Updating upload ${uploadId} status to ${status}. Message: "${finalErrorMessage}"`);
+
         await prisma.upload.update({
             where: { id: uploadId },
-            data: { status: 'failed', errorMessage: String(errorMessage), processingProgress: 0 }
-        }).catch(() => {}); // ignore if DB also down
+            data: { status, errorMessage: finalErrorMessage, processingProgress: 0 }
+        }).catch((dbErr) => {
+            console.error(`[DB_WRITE:ERROR] Failed in job error handler to update upload ${uploadId}: ${dbErr.message}`);
+        });
         throw err;
     }
 }

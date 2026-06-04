@@ -3,7 +3,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 
-
 const authRoutes = require('./routes/auth');
 const uploadRoutes = require('./routes/uploads');
 const reportRoutes = require('./routes/reports');
@@ -15,6 +14,7 @@ const userRoutes = require('./routes/users');
 const adminRoutes = require('./routes/admin');
 const matchRoutes = require('./routes/matches');
 const tournamentRoutes = require('./routes/tournaments');
+const healthRoutes = require('./routes/health');
 
 const app = express();
 
@@ -31,6 +31,8 @@ const allowedOrigins = [...new Set([
     "https://crickbuddy.tech",
     "https://www.crickbuddy.tech",
     "https://crick-buddy-frontend.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     ..._envOrigins,
 ])];
 
@@ -49,11 +51,9 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
 
-
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
 
 // =========================
 // ✅ ROOT ROUTE (IMPORTANT)
@@ -63,19 +63,9 @@ app.get('/', (req, res) => {
 });
 
 // =========================
-// ✅ HEALTH CHECK
-// =========================
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        service: 'crick-buddy-backend',
-        timestamp: new Date().toISOString()
-    });
-});
-
-// =========================
 // ✅ API ROUTES
 // =========================
+app.use('/api', healthRoutes); // Mount /health and /status here
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/uploads', uploadRoutes);
