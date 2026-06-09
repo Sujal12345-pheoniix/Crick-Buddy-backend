@@ -37,6 +37,27 @@ async function validateAiServiceUrl(aiUrl) {
     }
 }
 
+function isTransientAiServiceError(err) {
+    const status = err?.response?.status;
+    const message = String(err?.message || '').toLowerCase();
+
+    return (
+        err?.code === 'ECONNABORTED' ||
+        err?.code === 'ETIMEDOUT' ||
+        err?.code === 'ECONNREFUSED' ||
+        err?.code === 'ECONNRESET' ||
+        err?.code === 'EPIPE' ||
+        err?.code === 'UND_ERR_SOCKET' ||
+        message.includes('socket hang up') ||
+        message.includes('socket closed') ||
+        message.includes('network error') ||
+        message.includes('timeout') ||
+        status === 502 ||
+        status === 503 ||
+        status === 504
+    );
+}
+
 // Wrapper for Axios request to AI Service with 3 attempts and exponential backoff
 async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts = 3) {
     const aiUrl = process.env.AI_SERVICE_URL;
@@ -78,7 +99,7 @@ async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts =
             
             if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || /timeout/i.test(err.message || '')) {
                 errorType = 'TIMEOUT';
-            } else if (err.code === 'ECONNREFUSED') {
+            } else if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'UND_ERR_SOCKET' || /socket hang up/i.test(err.message || '')) {
                 errorType = 'CONNECTION_REFUSED';
             } else if (status === 502 || status === 503 || status === 504) {
                 errorType = 'SERVICE_SLEEPING_OR_BAD_GATEWAY';
@@ -106,10 +127,6 @@ let analysisWorker = null;
 
 function isQueueEnabled() {
     return String(process.env.ENABLE_ANALYSIS_QUEUE || '').toLowerCase() === 'true';
-}
-
-function rand(min, max) {
-    return Math.round((Math.random() * (max - min) + min) * 10) / 10;
 }
 
 function toStringList(value, fallback = []) {
@@ -177,94 +194,28 @@ function normalizeAnalysis(type, raw) {
     };
 }
 
+/**
+ * Returns a structured error payload when the AI service is unavailable.
+ * IMPORTANT: This function does NOT generate fake or random scores.
+ * All biomechanical scores must come from real pose analysis.
+ * If the AI service is unavailable, the upload status is kept as 'pending'
+ * and the user is informed clearly.
+ */
 function buildFallbackAnalysis(type, reason = 'AI service unavailable') {
-    if (type === 'batting') {
-        const stanceScore = rand(68, 88);
-        const headPositionScore = rand(66, 90);
-        const timingScore = rand(64, 86);
-        const followThroughScore = rand(67, 89);
-        const overall = Math.round((stanceScore + headPositionScore + timingScore + followThroughScore) / 4);
-        return {
-            batting_metrics: {
-                stanceScore,
-                batSwingAngle: rand(35, 62),
-                headPosition: 'Fallback analysis: keep your head still through impact',
-                headPositionScore,
-                timingScore,
-                followThroughScore,
-                shotType: 'Straight Drive',
-                overallBattingScore: overall
-            },
-            strengths: ['Compact setup at release point', 'Reasonable transfer through the shot'],
-            weaknesses: ['Inconsistent contact timing under pressure'],
-            mistakes: ['Front shoulder opening too early'],
-            improvement_suggestions: ['Do 50 front-foot shadow reps daily', 'Add underarm throwdowns focused on late contact'],
-            training_drills: ['Stump-gate bat path drill: 4 sets x 12 reps', 'Drop-ball timing drill: 3 sets x 20 balls'],
-            recommendations: ['Use lighter training bat for rhythm sessions'],
-            best_practices: ['Review one net video every week and track one technical cue'],
-            overall_score: overall,
-            landmarks: null,
-            fallback_reason: reason
-        };
-    }
-
-    if (type === 'bowling') {
-        const wristPositionScore = rand(65, 87);
-        const armRotationScore = rand(64, 89);
-        const releasePointScore = rand(66, 90);
-        const balanceScore = rand(63, 88);
-        const overall = Math.round((wristPositionScore + armRotationScore + releasePointScore + balanceScore) / 4);
-        return {
-            bowling_metrics: {
-                wristPositionScore,
-                wristPositionNote: 'Fallback analysis: keep wrist behind seam at release',
-                armRotationAngle: rand(154, 176),
-                armRotationScore,
-                releasePointScore,
-                releasePointNote: 'Aim for slightly higher release to improve bounce',
-                estimatedBallSpeed: rand(108, 136),
-                balanceScore,
-                bowlingStyle: 'Medium-Fast',
-                overallBowlingScore: overall
-            },
-            strengths: ['Stable run-up rhythm'],
-            weaknesses: ['Release consistency can improve'],
-            mistakes: ['Collapsing front side near release'],
-            improvement_suggestions: ['Train with a target cone for repeatable release'],
-            training_drills: ['One-step bowling drill: 5 sets x 6 balls', 'Seam presentation drill: 30 releases'],
-            recommendations: ['Include ankle and hip mobility work pre-session'],
-            best_practices: ['Track over-by-over consistency, not just peak speed'],
-            overall_score: overall,
-            landmarks: null,
-            fallback_reason: reason
-        };
-    }
-
-    const shoulderAlignmentScore = rand(67, 90);
-    const kneeBendScore = rand(65, 88);
-    const balanceScore = rand(66, 91);
-    const spinePosScore = rand(67, 90);
-    const overall = Math.round((shoulderAlignmentScore + kneeBendScore + balanceScore + spinePosScore) / 4);
     return {
-        posture_metrics: {
-            shoulderAlignmentScore,
-            shoulderAlignmentNote: 'Fallback analysis: maintain shoulder level during setup',
-            kneeBendAngle: rand(142, 168),
-            kneeBendScore,
-            balanceScore,
-            spinePosScore,
-            overallPostureScore: overall
-        },
-        strengths: ['Reasonable neutral stance posture'],
-        weaknesses: ['Body alignment drifts during movement'],
-        mistakes: ['Insufficient knee flex at setup'],
-        improvement_suggestions: ['Work on balanced athletic stance before each rep'],
-        training_drills: ['Wall-posture hold: 4 sets x 30 sec', 'Split-stance hold: 3 sets x 25 sec each side'],
-        recommendations: ['Prioritize glute and core activation warm-up'],
-        best_practices: ['Capture posture from front and side angles once weekly'],
-        overall_score: overall,
+        success: false,
+        fallback: true,
+        fallback_reason: reason,
+        message: 'Analysis could not be completed — your video has been saved and will be re-analysed automatically.',
+        overall_score: 0,
         landmarks: null,
-        fallback_reason: reason
+        strengths: [],
+        weaknesses: [],
+        mistakes: [],
+        improvement_suggestions: ['Re-upload your video once the service is back online for a real analysis.'],
+        training_drills: [],
+        recommendations: [],
+        best_practices: [],
     };
 }
 
@@ -332,11 +283,21 @@ async function processJob(job) {
         const aiUrl = process.env.AI_SERVICE_URL;
         const endpoint = `${aiUrl}/analyze/${type}`;
 
+        let fileBuffer = rawBuffer;
+        if (!fileBuffer && process.env.STORAGE_MODE === 'local' && job.data.filePath) {
+            const fs = require('fs');
+            if (fs.existsSync(job.data.filePath)) {
+                fileBuffer = fs.readFileSync(job.data.filePath);
+            } else {
+                console.warn(`⚠️  Local file not found at path: ${job.data.filePath}`);
+            }
+        }
+
         const formData = new FormData();
         
-        if (rawBuffer) {
-            const fileBuffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
-            formData.append('file', fileBuffer, {
+        if (fileBuffer) {
+            const processedBuffer = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(fileBuffer);
+            formData.append('file', processedBuffer, {
                 filename: fileName || `upload.${type === 'posture' ? 'jpg' : 'mp4'}`,
                 contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
             });
@@ -357,53 +318,29 @@ async function processJob(job) {
         try {
             analysis = await callAiWithRetry(endpoint, formData, uploadId, type);
         } catch (aiErr) {
-            const isTimeout = (
-                aiErr.code === 'ECONNABORTED' ||
-                aiErr.code === 'ETIMEDOUT' ||
-                aiErr.code === 'ERR_CANCELED' ||
-                /timeout/i.test(aiErr.message || '')
-            );
-
-            if (isTimeout) {
-                // AI service is slow (cold start / large video) — use rule-based fallback
-                // so the user always gets a real report instead of a hard failure.
-                console.warn(`⚠️  AI service timed out for upload ${uploadId}. Using rule-based fallback analysis.`);
-                analysis = buildFallbackAnalysis(type, 'AI service response timed out — rule-based analysis applied');
+            if (isTransientAiServiceError(aiErr)) {
+                // AI service timed out. Keep upload as pending for retry.
+                // Do NOT generate fake scores — real analysis requires real pose detection.
+                console.warn(`⚠️  AI service temporarily unavailable for upload ${uploadId}. Keeping as pending for retry.`);
+                await prisma.upload.update({
+                    where: { id: uploadId },
+                    data: {
+                        status: 'pending',
+                        errorMessage: 'AI analysis service is currently unavailable. Your upload has been saved and analysis will resume automatically.',
+                        processingProgress: 0
+                    }
+                }).catch((dbErr) => {
+                    console.error(`[DB_WRITE:ERROR] Failed to update transient error status: ${dbErr.message}`);
+                });
+                return { success: false, reason: 'AI service unavailable, status kept as pending' };
             } else {
-                const status = aiErr.response?.status;
-                const isUnavailable = (
-                    aiErr.code === 'ECONNREFUSED' ||
-                    status === 502 ||
-                    status === 503 ||
-                    status === 504
-                );
-                
-                if (isUnavailable) {
-                    const friendlyMessage = 'AI analysis service is currently unavailable. Your upload has been saved and analysis will resume automatically.';
-                    console.log(`[DB_WRITE:INFO] AI Service unavailable for upload ${uploadId}. Setting status to pending. Message: "${friendlyMessage}"`);
-                    
-                    await prisma.upload.update({
-                        where: { id: uploadId },
-                        data: {
-                            status: 'pending',
-                            errorMessage: friendlyMessage,
-                            processingProgress: 0
-                        }
-                    }).catch((dbErr) => {
-                        console.error(`[DB_WRITE:ERROR] Failed to update upload status: ${dbErr.message}`);
-                    });
-                    
-                    // Exit gracefully without throwing error to the runner
-                    return { success: false, reason: 'AI service unavailable, status kept as pending' };
-                } else {
-                    const d = aiErr.response?.data?.detail;
-                    const reason =
-                        (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
-                        aiErr.response?.data?.message ||
-                        aiErr.message;
-                    console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
-                    throw new Error(reason);
-                }
+                const d = aiErr.response?.data?.detail;
+                const reason =
+                    (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
+                    aiErr.response?.data?.message ||
+                    aiErr.message;
+                console.error(`❌ AI Analysis failed for upload ${uploadId}: ${reason}`);
+                throw new Error(reason);
             }
         }
 
@@ -422,28 +359,45 @@ async function processJob(job) {
             uploadId,
             userId,
             type,
+
+            // ── Batting Temporal Metrics ─────────────────────────────────────────
+            headStabilityScore: analysis.batting_metrics?.headStabilityScore ?? null,
+            headStabilityVariance: analysis.batting_metrics?.headStabilityVariance ?? null,
+            timingScore: analysis.batting_metrics?.timingScore ?? null,
+            peakKneeFlexion: analysis.batting_metrics?.peakKneeFlexion ?? null,
+            peakKneeExtension: analysis.batting_metrics?.peakKneeExtension ?? null,
+            rangeOfMotion: analysis.batting_metrics?.rangeOfMotion ?? null,
+            followThroughScore: analysis.batting_metrics?.followThroughScore ?? null,
+            wristYDelta: analysis.batting_metrics?.wristYDelta ?? null,
+            strideScore: analysis.batting_metrics?.strideScore ?? null,
+            avgStrideRatio: analysis.batting_metrics?.avgStrideRatio ?? null,
+
+            // ── Batting Single-Frame Metrics ──────────────────────────────────────
             stanceScore: analysis.batting_metrics?.stanceScore ?? null,
             batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
+            wristPositionScore: analysis.batting_metrics?.wristPositionScore ?? null,
             headPosition: analysis.batting_metrics?.headPosition ?? null,
             headPositionScore: analysis.batting_metrics?.headPositionScore ?? null,
-            timingScore: analysis.batting_metrics?.timingScore ?? null,
-            followThroughScore: analysis.batting_metrics?.followThroughScore ?? null,
             shotType: analysis.batting_metrics?.shotType ?? null,
             overallBattingScore: analysis.batting_metrics?.overallBattingScore ?? null,
-            
-            // Bowling Metrics
-            wristPositionScore: analysis.bowling_metrics?.wristPositionScore ?? null,
+
+            // ── Bowling Metrics ───────────────────────────────────────────────────
+            armSmoothnessScore: analysis.bowling_metrics?.armSmoothnessScore ?? null,
+            avgJerk: analysis.bowling_metrics?.avgJerk ?? null,
+            releasePointScore: analysis.bowling_metrics?.releasePointScore ?? null,
+            peakWristY: analysis.bowling_metrics?.peakWristY ?? null,
+            releaseArmAngle: analysis.bowling_metrics?.releaseArmAngle ?? null,
             wristPositionNote: analysis.bowling_metrics?.wristPositionNote ?? null,
             armRotationAngle: analysis.bowling_metrics?.armRotationAngle ?? null,
             armRotationScore: analysis.bowling_metrics?.armRotationScore ?? null,
-            releasePointScore: analysis.bowling_metrics?.releasePointScore ?? null,
             releasePointNote: analysis.bowling_metrics?.releasePointNote ?? null,
             estimatedBallSpeed: analysis.bowling_metrics?.estimatedBallSpeed ?? null,
+            speedClassification: analysis.bowling_metrics?.speedClassification ?? null,
             balanceScoreBowling: analysis.bowling_metrics?.balanceScore ?? null,
             bowlingStyle: analysis.bowling_metrics?.bowlingStyle ?? null,
             overallBowlingScore: analysis.bowling_metrics?.overallBowlingScore ?? null,
 
-            // Posture Metrics
+            // ── Posture Metrics ───────────────────────────────────────────────────
             shoulderAlignmentScore: analysis.posture_metrics?.shoulderAlignmentScore ?? null,
             shoulderAlignmentNote: analysis.posture_metrics?.shoulderAlignmentNote ?? null,
             kneeBendAngle: analysis.posture_metrics?.kneeBendAngle ?? null,
@@ -452,7 +406,12 @@ async function processJob(job) {
             spinePosScore: analysis.posture_metrics?.spinePosScore ?? null,
             overallPostureScore: analysis.posture_metrics?.overallPostureScore ?? null,
 
-            // AI Report (JSON arrays)
+            // ── Shared Balance (temporal) ─────────────────────────────────────────
+            balanceScore: analysis.batting_metrics?.balanceScore ?? analysis.bowling_metrics?.balanceScore ?? analysis.posture_metrics?.balanceScore ?? null,
+            avgHipTilt: analysis.batting_metrics?.avgHipTilt ?? analysis.bowling_metrics?.avgHipTilt ?? null,
+            avgSpineOffset: analysis.batting_metrics?.avgSpineOffset ?? null,
+
+            // ── AI Report (JSON arrays) ───────────────────────────────────────────
             strengths: analysis.strengths || [],
             weaknesses: analysis.weaknesses || [],
             mistakes: analysis.mistakes || [],
@@ -464,6 +423,12 @@ async function processJob(job) {
             landmarks: analysis.landmarks ?? null
         };
 
+        if (existingReport) {
+            await prisma.rawFrameMetric.deleteMany({ where: { reportId: existingReport.id } }).catch(e => console.warn('⚠️  Could not clean rawFrameMetrics:', e.message));
+            await prisma.aggregateMetric.deleteMany({ where: { reportId: existingReport.id } }).catch(e => console.warn('⚠️  Could not clean aggregateMetrics:', e.message));
+            await prisma.faultLog.deleteMany({ where: { reportId: existingReport.id } }).catch(e => console.warn('⚠️  Could not clean faultLog:', e.message));
+        }
+
         const report = existingReport
             ? await prisma.analysisReport.update({
                 where: { id: existingReport.id },
@@ -472,6 +437,87 @@ async function processJob(job) {
             : await prisma.analysisReport.create({ data: reportPayload });
 
         console.log(`[DB_WRITE:INFO] ${existingReport ? 'Updated' : 'Created'} analysis report with ID ${report.id} for upload ${uploadId}`);
+
+        // Save RawFrameMetric records
+        if (analysis.raw_frame_metrics && Array.isArray(analysis.raw_frame_metrics)) {
+            try {
+                const rawMetrics = analysis.raw_frame_metrics.map(fm => ({
+                    uploadId,
+                    reportId: report.id,
+                    frameIndex: fm.frameIndex,
+                    frameType: fm.frameType,
+                    landmarks: fm.landmarks ?? null,
+                    leftKneeAngle: fm.leftKneeAngle ?? null,
+                    rightKneeAngle: fm.rightKneeAngle ?? null,
+                    leftElbowAngle: fm.leftElbowAngle ?? null,
+                    rightElbowAngle: fm.rightElbowAngle ?? null,
+                    shoulderTilt: fm.shoulderTilt ?? null,
+                    hipTilt: fm.hipTilt ?? null,
+                    spineOffset: fm.spineOffset ?? null,
+                    wristY: fm.wristY ?? null,
+                    noseY: fm.noseY ?? null,
+                    ankleSpread: fm.ankleSpread ?? null,
+                }));
+                await prisma.rawFrameMetric.createMany({ data: rawMetrics });
+                console.log(`[DB_WRITE:INFO] Saved ${rawMetrics.length} RawFrameMetric records`);
+            } catch (rawErr) {
+                console.error('⚠️  Failed to save RawFrameMetric records:', rawErr.message);
+            }
+        }
+
+        // Save AggregateMetric record
+        try {
+            const b = analysis.batting_metrics || {};
+            const bw = analysis.bowling_metrics || {};
+            const p = analysis.posture_metrics || {};
+
+            await prisma.aggregateMetric.create({
+                data: {
+                    reportId: report.id,
+                    headStabilityScore: b.headStabilityScore ?? null,
+                    headStabilityVariance: b.headStabilityVariance ?? null,
+                    balanceScore: b.balanceScore ?? bw.balanceScore ?? p.balanceScore ?? null,
+                    avgHipTilt: b.avgHipTilt ?? bw.avgHipTilt ?? null,
+                    avgSpineOffset: b.avgSpineOffset ?? null,
+                    timingScore: b.timingScore ?? null,
+                    peakKneeFlexion: b.peakKneeFlexion ?? null,
+                    kneeExtensionAtEnd: b.peakKneeExtension ?? null,
+                    rangeOfMotion: b.rangeOfMotion ?? null,
+                    strideScore: b.strideScore ?? null,
+                    avgStrideRatio: b.avgStrideRatio ?? null,
+                    armSmoothnessScore: bw.armSmoothnessScore ?? null,
+                    avgJerk: bw.avgJerk ?? null,
+                    releasePointScore: bw.releasePointScore ?? null,
+                    peakWristY: bw.peakWristY ?? null,
+                    followThroughScore: b.followThroughScore ?? null,
+                    wristYDelta: b.wristYDelta ?? null,
+                    detectedShotType: b.shotType ?? null,
+                    bowlingStyle: bw.bowlingStyle ?? null,
+                }
+            });
+            console.log(`[DB_WRITE:INFO] Saved AggregateMetric record`);
+        } catch (aggErr) {
+            console.error('⚠️  Failed to save AggregateMetric record:', aggErr.message);
+        }
+
+        // Save FaultLog records
+        if (analysis.faults && Array.isArray(analysis.faults)) {
+            try {
+                const faultLogs = analysis.faults.map(f => ({
+                    reportId: report.id,
+                    faultCode: f.faultCode,
+                    faultText: f.faultText,
+                    metric: f.metric,
+                    value: f.value ?? null,
+                    threshold: f.threshold ?? null,
+                    severity: f.severity || 'moderate',
+                }));
+                await prisma.faultLog.createMany({ data: faultLogs });
+                console.log(`[DB_WRITE:INFO] Saved ${faultLogs.length} FaultLog records`);
+            } catch (faultErr) {
+                console.error('⚠️  Failed to save FaultLog records:', faultErr.message);
+            }
+        }
 
         try {
             const progressExists = await prisma.progressEntry.findFirst({
@@ -489,15 +535,21 @@ async function processJob(job) {
                         userId,
                         reportId: report.id,
                         type,
-                        batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
-                        stanceScore: analysis.batting_metrics?.stanceScore ?? null,
+                        // Batting temporal metrics
+                        headStabilityScore: analysis.batting_metrics?.headStabilityScore ?? null,
                         timingScore: analysis.batting_metrics?.timingScore ?? null,
                         followThroughScore: analysis.batting_metrics?.followThroughScore ?? null,
+                        strideScore: analysis.batting_metrics?.strideScore ?? null,
+                        balanceScore: analysis.batting_metrics?.balanceScore ?? analysis.bowling_metrics?.balanceScore ?? analysis.posture_metrics?.balanceScore ?? null,
+                        // Batting single-frame
+                        batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
+                        stanceScore: analysis.batting_metrics?.stanceScore ?? null,
+                        // Bowling metrics
                         estimatedBallSpeed: analysis.bowling_metrics?.estimatedBallSpeed ?? null,
                         armRotationAngle: analysis.bowling_metrics?.armRotationAngle ?? null,
                         wristPositionScore: analysis.bowling_metrics?.wristPositionScore ?? null,
                         releasePointScore: analysis.bowling_metrics?.releasePointScore ?? null,
-                        balanceScore: analysis.batting_metrics?.balanceScore ?? analysis.bowling_metrics?.balanceScore ?? analysis.posture_metrics?.balanceScore ?? null,
+                        armSmoothnessScore: analysis.bowling_metrics?.armSmoothnessScore ?? null,
                         overallScore: analysis.overall_score ?? 0,
                     }
                 });
@@ -544,12 +596,7 @@ async function processJob(job) {
         }
         console.error('❌ Job error processing video:', errorMessage);
         
-        const isUnavailable = (
-            err.code === 'ECONNREFUSED' ||
-            err.response?.status === 502 ||
-            err.response?.status === 503 ||
-            err.response?.status === 504
-        );
+        const isUnavailable = isTransientAiServiceError(err);
         
         const status = isUnavailable ? 'pending' : 'failed';
         const finalErrorMessage = isUnavailable 

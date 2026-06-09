@@ -43,15 +43,22 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             });
         }
 
-        // multer-storage-cloudinary has already uploaded the file.
-        // req.file.path contains the secure URL.
-        const fileUrl = req.file.path;
+        const isLocal = process.env.STORAGE_MODE === 'local';
+        let fileUrl;
+        let filePath = null;
+
+        if (isLocal) {
+            fileUrl = `/uploads/${req.file.filename}`;
+            filePath = req.file.path;
+        } else {
+            fileUrl = req.file.path;
+        }
         
         const isVideo = req.file.mimetype.startsWith('video/') ||
             VIDEO_EXTENSIONS.has(path.extname(req.file.originalname).toLowerCase());
 
         const ext = path.extname(req.file.originalname) || (isVideo ? '.mp4' : '.jpg');
-        const uniqueFilename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+        const uniqueFilename = isLocal ? req.file.filename : `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
 
         const uploadDoc = await prisma.upload.create({
             data: {
@@ -61,7 +68,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
                 originalName: req.file.originalname,
                 mimeType: req.file.mimetype,
                 fileSize: req.file.size || 0,
-                fileUrl,             // Real Cloudinary HTTPS URL
+                fileUrl,             // Real Cloudinary HTTPS URL or relative /uploads path
                 status: 'pending',
                 notes: notes || null
             }
@@ -72,11 +79,12 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             data: { totalUploads: { increment: 1 } }
         });
 
-        // ── Queue AI analysis — pass Cloudinary URL ──────────
+        // ── Queue AI analysis — pass Cloudinary URL or local filePath ──────────
         const { enqueueAnalysis } = require('../utils/queue');
         const enqueueResult = await enqueueAnalysis({
             uploadId: uploadDoc.id,
-            fileUrl,                        // Cloudinary URL for AI service to download
+            fileUrl,                        
+            filePath,
             fileName: req.file.originalname,
             mimeType: req.file.mimetype,
             type,
@@ -89,7 +97,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
 
         res.status(201).json({
             success: true,
-            message: 'File uploaded to cloud storage. Analysis queued.',
+            message: isLocal ? 'File uploaded locally. Analysis queued.' : 'File uploaded to cloud storage. Analysis queued.',
             upload: uploadDoc
         });
     } catch (err) {
@@ -136,7 +144,9 @@ router.post('/:id/retry', protect, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Upload not found' });
         }
 
-        if (!uploadDoc.fileUrl || !uploadDoc.fileUrl.startsWith('https://')) {
+        const isLocal = process.env.STORAGE_MODE === 'local';
+
+        if (!isLocal && (!uploadDoc.fileUrl || !uploadDoc.fileUrl.startsWith('https://'))) {
             return res.status(400).json({
                 success: false,
                 message: 'No cloud URL available for this upload. Please re-upload the file.'
@@ -149,10 +159,16 @@ router.post('/:id/retry', protect, async (req, res) => {
             data: { status: 'pending', processingProgress: 0, errorMessage: null }
         });
 
+        let filePath = null;
+        if (isLocal) {
+            filePath = path.join(__dirname, '../../uploads', uploadDoc.filename);
+        }
+
         const { enqueueAnalysis } = require('../utils/queue');
         await enqueueAnalysis({
             uploadId: uploadDoc.id,
-            fileUrl: uploadDoc.fileUrl,   // Download from Cloudinary on retry
+            fileUrl: uploadDoc.fileUrl,   
+            filePath,
             fileName: uploadDoc.originalName,
             mimeType: uploadDoc.mimeType,
             type: uploadDoc.type,
@@ -161,7 +177,7 @@ router.post('/:id/retry', protect, async (req, res) => {
 
         return res.json({
             success: true,
-            message: 'Analysis retry queued using stored cloud file.'
+            message: 'Analysis retry queued.'
         });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });

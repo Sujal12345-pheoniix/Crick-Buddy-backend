@@ -159,12 +159,11 @@ router.get('/summary', protect, async (req, res) => {
 router.get('/match-performance', protect, async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-        const latestFirst = await prisma.progressEntry.findMany({
-            where: { userId: req.user.id, type: 'match' },
-            orderBy: { date: 'desc' },
+        const entries = await prisma.matchPerformanceEntry.findMany({
+            where: { userId: req.user.id },
+            orderBy: { matchDate: 'asc' },
             take: limit
         });
-        const entries = latestFirst.reverse();
         res.json({ success: true, entries });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -174,9 +173,9 @@ router.get('/match-performance', protect, async (req, res) => {
 // GET /api/progress/match-performance/analysis
 router.get('/match-performance/analysis', protect, async (req, res) => {
     try {
-        const entries = await prisma.progressEntry.findMany({
-            where: { userId: req.user.id, type: 'match' },
-            orderBy: { date: 'asc' }
+        const entries = await prisma.matchPerformanceEntry.findMany({
+            where: { userId: req.user.id },
+            orderBy: { matchDate: 'asc' }
         });
 
         if (!entries.length) {
@@ -203,20 +202,20 @@ router.get('/match-performance/analysis', protect, async (req, res) => {
         const previous = entries.length > 1 ? entries[entries.length - 2] : null;
         const feedback = generateGrowthFeedback(
             {
-                battingScore: latest.stanceScore || 0,
-                bowlingScore: latest.releasePointScore || 0,
-                fieldingScore: latest.balanceScore || 0,
-                strikeRate: latest.batSwingAngle || 0,
-                economy: latest.armRotationAngle || 0,
+                battingScore: latest.battingScore || 0,
+                bowlingScore: latest.bowlingScore || 0,
+                fieldingScore: latest.fieldingScore || 0,
+                strikeRate: latest.strikeRate || 0,
+                economy: latest.economy || 0,
                 overallScore: latest.overallScore || 0
             },
             previous
                 ? {
-                    battingScore: previous.stanceScore || 0,
-                    bowlingScore: previous.releasePointScore || 0,
-                    fieldingScore: previous.balanceScore || 0,
-                    strikeRate: previous.batSwingAngle || 0,
-                    economy: previous.armRotationAngle || 0,
+                    battingScore: previous.battingScore || 0,
+                    bowlingScore: previous.bowlingScore || 0,
+                    fieldingScore: previous.fieldingScore || 0,
+                    strikeRate: previous.strikeRate || 0,
+                    economy: previous.economy || 0,
                     overallScore: previous.overallScore || 0
                 }
                 : null
@@ -251,28 +250,36 @@ router.post('/match-performance', protect, async (req, res) => {
             stumpings = 0
         } = req.body;
 
+        const parsedRuns = Math.max(0, parseInt(runs, 10) || 0);
+        const parsedBalls = Math.max(0, parseInt(balls, 10) || 0);
+        const parsedWickets = Math.max(0, parseInt(wickets, 10) || 0);
+        const parsedOversBowled = Math.max(0, parseFloat(oversBowled) || 0);
+        const parsedRunsConceded = Math.max(0, parseInt(runsConceded, 10) || 0);
+        const parsedCatches = Math.max(0, parseInt(catches, 10) || 0);
+        const parsedStumpings = Math.max(0, parseInt(stumpings, 10) || 0);
+
         const scores = scoreMatchPerformance({
-            runs,
-            balls,
-            wickets,
-            oversBowled,
-            runsConceded,
-            catches,
-            stumpings
+            runs: parsedRuns,
+            balls: parsedBalls,
+            wickets: parsedWickets,
+            oversBowled: parsedOversBowled,
+            runsConceded: parsedRunsConceded,
+            catches: parsedCatches,
+            stumpings: parsedStumpings
         });
 
-        const previous = await prisma.progressEntry.findFirst({
-            where: { userId: req.user.id, type: 'match' },
-            orderBy: { date: 'desc' }
+        const previous = await prisma.matchPerformanceEntry.findFirst({
+            where: { userId: req.user.id },
+            orderBy: { matchDate: 'desc' }
         });
 
         const previousComputed = previous
             ? {
-                battingScore: previous.stanceScore || 0,
-                bowlingScore: previous.releasePointScore || 0,
-                fieldingScore: previous.balanceScore || 0,
-                strikeRate: previous.batSwingAngle || 0,
-                economy: previous.armRotationAngle || 0,
+                battingScore: previous.battingScore || 0,
+                bowlingScore: previous.bowlingScore || 0,
+                fieldingScore: previous.fieldingScore || 0,
+                strikeRate: previous.strikeRate || 0,
+                economy: previous.economy || 0,
                 overallScore: previous.overallScore || 0
             }
             : null;
@@ -281,7 +288,7 @@ router.post('/match-performance', protect, async (req, res) => {
         try {
             const aiUrl = process.env.AI_SERVICE_URL;
             const aiResp = await axios.post(`${aiUrl}/match-growth`, {
-                latest: { matchDate, runs, balls, wickets, oversBowled, runsConceded, catches, stumpings, computed: scores },
+                latest: { matchDate, runs: parsedRuns, balls: parsedBalls, wickets: parsedWickets, oversBowled: parsedOversBowled, runsConceded: parsedRunsConceded, catches: parsedCatches, stumpings: parsedStumpings, computed: scores },
                 previous: previousComputed ? { computed: previousComputed } : null,
                 history: []
             }, { timeout: 15000 });
@@ -292,18 +299,24 @@ router.post('/match-performance', protect, async (req, res) => {
             // silent fallback to local heuristic feedback
         }
 
-        const entry = await prisma.progressEntry.create({
+        const entry = await prisma.matchPerformanceEntry.create({
             data: {
                 userId: req.user.id,
-                type: 'match',
-                date: matchDate ? new Date(matchDate) : new Date(),
-                // Reusing numeric columns for match KPIs to avoid schema change.
-                stanceScore: scores.battingScore,
-                releasePointScore: scores.bowlingScore,
-                balanceScore: scores.fieldingScore,
-                batSwingAngle: scores.strikeRate,
-                armRotationAngle: scores.economy,
-                overallScore: scores.overallScore
+                matchDate: matchDate ? new Date(matchDate) : new Date(),
+                runs: parsedRuns,
+                balls: parsedBalls,
+                wickets: parsedWickets,
+                oversBowled: parsedOversBowled,
+                runsConceded: parsedRunsConceded,
+                catches: parsedCatches,
+                stumpings: parsedStumpings,
+                strikeRate: scores.strikeRate,
+                economy: scores.economy,
+                battingScore: scores.battingScore,
+                bowlingScore: scores.bowlingScore,
+                fieldingScore: scores.fieldingScore,
+                overallScore: scores.overallScore,
+                trend: feedback.trend || 'stable'
             }
         });
 
@@ -319,3 +332,4 @@ router.post('/match-performance', protect, async (req, res) => {
 });
 
 module.exports = router;
+

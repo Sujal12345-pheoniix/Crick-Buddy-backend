@@ -11,7 +11,9 @@ router.get('/', protect, async (req, res) => {
             include: {
                 upload: {
                     select: { id: true, type: true, filename: true, originalName: true, fileUrl: true, createdAt: true }
-                }
+                },
+                aggregateMetrics: true,
+                faultLog: true
             },
             orderBy: { createdAt: 'desc' },
             take: 50
@@ -30,7 +32,14 @@ router.get('/by-upload/:uploadId', protect, async (req, res) => {
     try {
         const reportData = await prisma.analysisReport.findFirst({ 
             where: { uploadId: req.params.uploadId, userId: req.user.id },
-            include: { upload: true }
+            include: { 
+                upload: true,
+                rawFrameMetrics: {
+                    orderBy: { frameIndex: 'asc' }
+                },
+                aggregateMetrics: true,
+                faultLog: true
+            }
         });
         if (!reportData) return res.status(404).json({ success: false, message: 'Report not found for this upload' });
         res.json({ success: true, report: formatReport(reportData) });
@@ -47,7 +56,12 @@ router.get('/:id', protect, async (req, res) => {
             include: {
                 upload: {
                     select: { id: true, type: true, filename: true, originalName: true, fileUrl: true, createdAt: true, notes: true }
-                }
+                },
+                rawFrameMetrics: {
+                    orderBy: { frameIndex: 'asc' }
+                },
+                aggregateMetrics: true,
+                faultLog: true
             }
         });
         if (!reportData) return res.status(404).json({ success: false, message: 'Report not found' });
@@ -65,23 +79,37 @@ function formatReport(report) {
     return {
         ...report,
         battingMetrics: report.type === 'batting' ? {
+            headStabilityScore: report.headStabilityScore,
+            headStabilityVariance: report.headStabilityVariance,
+            timingScore: report.timingScore,
+            peakKneeFlexion: report.peakKneeFlexion,
+            peakKneeExtension: report.peakKneeExtension,
+            rangeOfMotion: report.rangeOfMotion,
+            followThroughScore: report.followThroughScore,
+            wristYDelta: report.wristYDelta,
+            strideScore: report.strideScore,
+            avgStrideRatio: report.avgStrideRatio,
             stanceScore: report.stanceScore,
             batSwingAngle: report.batSwingAngle,
             headPosition: report.headPosition,
             headPositionScore: report.headPositionScore,
-            timingScore: report.timingScore,
-            followThroughScore: report.followThroughScore,
+            wristPositionScore: report.wristPositionScore,
             shotType: report.shotType,
             overallBattingScore: report.overallBattingScore
         } : null,
         bowlingMetrics: report.type === 'bowling' ? {
+            armSmoothnessScore: report.armSmoothnessScore,
+            avgJerk: report.avgJerk,
+            releasePointScore: report.releasePointScore,
+            peakWristY: report.peakWristY,
+            releaseArmAngle: report.releaseArmAngle,
             wristPositionScore: report.wristPositionScore,
             wristPositionNote: report.wristPositionNote,
             armRotationAngle: report.armRotationAngle,
             armRotationScore: report.armRotationScore,
-            releasePointScore: report.releasePointScore,
             releasePointNote: report.releasePointNote,
             estimatedBallSpeed: report.estimatedBallSpeed,
+            speedClassification: report.speedClassification,
             balanceScore: report.balanceScoreBowling,
             bowlingStyle: report.bowlingStyle,
             overallBowlingScore: report.overallBowlingScore
@@ -94,7 +122,10 @@ function formatReport(report) {
             balanceScore: report.balanceScorePosture,
             spinePosScore: report.spinePosScore,
             overallPostureScore: report.overallPostureScore
-        } : null
+        } : null,
+        balanceScore: report.balanceScore,
+        avgHipTilt: report.avgHipTilt,
+        avgSpineOffset: report.avgSpineOffset
     };
 }
 

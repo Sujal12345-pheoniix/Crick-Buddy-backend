@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const path = require('path');
 
 const authRoutes = require('./routes/auth');
 const uploadRoutes = require('./routes/uploads');
@@ -14,6 +15,7 @@ const userRoutes = require('./routes/users');
 const adminRoutes = require('./routes/admin');
 const matchRoutes = require('./routes/matches');
 const tournamentRoutes = require('./routes/tournaments');
+const matchPerformanceRoutes = require('./routes/match_performance');
 const healthRoutes = require('./routes/health');
 
 const app = express();
@@ -55,6 +57,9 @@ app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Serve static uploads for local-first mode
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
 // =========================
 // ✅ ROOT ROUTE (IMPORTANT)
 // =========================
@@ -77,6 +82,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/tournaments', tournamentRoutes);
+app.use('/api/match-performance', matchPerformanceRoutes);
 
 // =========================
 // ❌ 404 HANDLER (KEEP LAST)

@@ -40,6 +40,7 @@ model User {
   progress        ProgressEntry[]
   uploads         Upload[]
   academy         Academy?         @relation(fields: [academyId], references: [id])
+  matchPerformances MatchPerformanceEntry[]
 }
 
 model Upload {
@@ -59,32 +60,47 @@ model Upload {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
   reports            AnalysisReport[]
+  rawFrameMetrics    RawFrameMetric[]
   user               User             @relation(fields: [userId], references: [id])
 }
 
 model AnalysisReport {
-  id                     String          @id @default(uuid())
-  uploadId               String
-  userId                 String
-  type                   String
-  stanceScore            Float?
-  batSwingAngle          Float?
-  headPosition           String?
-  headPositionScore      Float?
-  timingScore            Float?
-  followThroughScore     Float?
-  shotType               String?
-  overallBattingScore    Float?
-  wristPositionScore     Float?
-  wristPositionNote      String?
-  armRotationAngle       Float?
-  armRotationScore       Float?
-  releasePointScore      Float?
-  releasePointNote       String?
-  estimatedBallSpeed     Float?
-  balanceScoreBowling    Float?
-  bowlingStyle           String?
-  overallBowlingScore    Float?
+  id       String @id @default(uuid())
+  uploadId String
+  userId   String
+  type     String
+
+  headStabilityScore    Float?
+  headStabilityVariance Float?
+  timingScore           Float?
+  peakKneeFlexion       Float?
+  peakKneeExtension     Float?
+  rangeOfMotion         Float?
+  followThroughScore    Float?
+  wristYDelta           Float?
+  strideScore           Float?
+  avgStrideRatio        Float?
+  stanceScore           Float?
+  batSwingAngle         Float?
+  wristPositionScore    Float?
+  headPosition          String?
+  headPositionScore     Float?
+  shotType              String?
+  overallBattingScore   Float?
+  armSmoothnessScore    Float?
+  avgJerk               Float?
+  releasePointScore     Float?
+  peakWristY            Float?
+  releaseArmAngle       Float?
+  wristPositionNote     String?
+  armRotationAngle      Float?
+  armRotationScore      Float?
+  releasePointNote      String?
+  estimatedBallSpeed    Float?
+  speedClassification   String?
+  balanceScoreBowling   Float?
+  bowlingStyle          String?
+  overallBowlingScore   Float?
   shoulderAlignmentScore Float?
   shoulderAlignmentNote  String?
   kneeBendAngle          Float?
@@ -92,42 +108,141 @@ model AnalysisReport {
   balanceScorePosture    Float?
   spinePosScore          Float?
   overallPostureScore    Float?
+  balanceScore           Float?
+  avgHipTilt             Float?
+  avgSpineOffset         Float?
   strengths              Json?
   weaknesses             Json?
   improvementSuggestions Json?
   trainingDrills         Json?
   overallScore           Float?
   landmarks              Json?
-  createdAt              DateTime        @default(now())
-  updatedAt              DateTime        @updatedAt
   bestPractices          Json?
   recommendations        Json?
   mistakes               Json?
-  upload                 Upload          @relation(fields: [uploadId], references: [id])
-  user                   User            @relation(fields: [userId], references: [id])
-  progressEntries        ProgressEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  upload           Upload           @relation(fields: [uploadId], references: [id])
+  user             User             @relation(fields: [userId], references: [id])
+  progressEntries  ProgressEntry[]
+  rawFrameMetrics  RawFrameMetric[]
+  aggregateMetrics AggregateMetric?
+  faultLog         FaultLog[]
+}
+
+model RawFrameMetric {
+  id          String  @id @default(uuid())
+  uploadId    String
+  reportId    String?
+  frameIndex  Int
+  frameType   String
+  landmarks   Json?
+  leftKneeAngle   Float?
+  rightKneeAngle  Float?
+  leftElbowAngle  Float?
+  rightElbowAngle Float?
+  shoulderTilt    Float?
+  hipTilt         Float?
+  spineOffset     Float?
+  wristY          Float?
+  noseY           Float?
+  ankleSpread     Float?
+  createdAt   DateTime @default(now())
+  report AnalysisReport? @relation(fields: [reportId], references: [id])
+  upload Upload          @relation(fields: [uploadId], references: [id])
+  @@index([uploadId])
+  @@index([reportId])
+}
+
+model AggregateMetric {
+  id       String @id @default(uuid())
+  reportId String @unique
+  headStabilityScore    Float?
+  headStabilityVariance Float?
+  balanceScore    Float?
+  avgHipTilt      Float?
+  avgSpineOffset  Float?
+  timingScore        Float?
+  peakKneeFlexion    Float?
+  kneeExtensionAtEnd Float?
+  rangeOfMotion      Float?
+  strideScore    Float?
+  avgStrideRatio Float?
+  armSmoothnessScore Float?
+  avgJerk            Float?
+  releasePointScore  Float?
+  peakWristY         Float?
+  followThroughScore Float?
+  wristYDelta        Float?
+  detectedShotType String?
+  bowlingStyle     String?
+  createdAt DateTime @default(now())
+  report AnalysisReport @relation(fields: [reportId], references: [id])
+}
+
+model FaultLog {
+  id        String @id @default(uuid())
+  reportId  String
+  faultCode String
+  faultText String
+  metric    String
+  value     Float?
+  threshold Float?
+  severity  String
+  createdAt DateTime @default(now())
+  report AnalysisReport @relation(fields: [reportId], references: [id])
+  @@index([reportId])
 }
 
 model ProgressEntry {
-  id                 String          @id @default(uuid())
-  userId             String
-  reportId           String?
-  type               String
-  date               DateTime        @default(now())
-  batSwingAngle      Float?
-  stanceScore        Float?
+  id       String @id @default(uuid())
+  userId   String
+  reportId String?
+  type     String
+  date     DateTime @default(now())
+  headStabilityScore Float?
   timingScore        Float?
   followThroughScore Float?
+  strideScore        Float?
+  balanceScore       Float?
+  batSwingAngle      Float?
+  stanceScore        Float?
   estimatedBallSpeed Float?
   armRotationAngle   Float?
   wristPositionScore Float?
   releasePointScore  Float?
-  balanceScore       Float?
+  armSmoothnessScore Float?
   overallScore       Float?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-  report             AnalysisReport? @relation(fields: [reportId], references: [id])
-  user               User            @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  report AnalysisReport? @relation(fields: [reportId], references: [id])
+  user   User            @relation(fields: [userId], references: [id])
+}
+
+model MatchPerformanceEntry {
+  id        String   @id @default(uuid())
+  userId    String
+  matchDate DateTime
+  runs         Int   @default(0)
+  balls        Int   @default(0)
+  wickets      Int   @default(0)
+  oversBowled  Float @default(0)
+  runsConceded Int   @default(0)
+  catches      Int   @default(0)
+  stumpings    Int   @default(0)
+  strikeRate   Float @default(0)
+  economy      Float @default(0)
+  battingScore  Float @default(0)
+  bowlingScore  Float @default(0)
+  fieldingScore Float @default(0)
+  overallScore  Float @default(0)
+  trend String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id])
+  @@index([userId, matchDate])
 }
 
 model Match {
@@ -141,7 +256,6 @@ model Match {
   updatedAt  DateTime @updatedAt
   externalId String?
   source     String?
-
   @@index([externalId, source])
 }
 
