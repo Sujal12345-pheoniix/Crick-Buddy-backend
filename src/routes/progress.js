@@ -3,6 +3,7 @@ const router = express.Router();
 const { protect } = require('../middleware/auth');
 const prisma = require('../utils/prisma');
 const axios = require('axios');
+const { aiAuthHeaders } = require('../utils/aiAuth');
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -291,7 +292,7 @@ router.post('/match-performance', protect, async (req, res) => {
                 latest: { matchDate, runs: parsedRuns, balls: parsedBalls, wickets: parsedWickets, oversBowled: parsedOversBowled, runsConceded: parsedRunsConceded, catches: parsedCatches, stumpings: parsedStumpings, computed: scores },
                 previous: previousComputed ? { computed: previousComputed } : null,
                 history: []
-            }, { timeout: 15000 });
+            }, { timeout: 15000, headers: aiAuthHeaders() });
             if (aiResp.data?.analysis) {
                 feedback = aiResp.data.analysis;
             }

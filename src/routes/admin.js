@@ -144,11 +144,33 @@ router.get('/users/:id', async (req, res) => {
     }
 });
 
+const ADMIN_EDITABLE_FIELDS = ['name', 'email', 'role', 'experienceLevel', 'playerType', 'battingStyle', 'bowlingStyle', 'isActive'];
+const VALID_ROLES = ['player', 'coach', 'admin'];
+
 router.put('/users/:id', async (req, res) => {
     try {
+        const updates = {};
+        ADMIN_EDITABLE_FIELDS.forEach(field => {
+            if (req.body[field] !== undefined) updates[field] = req.body[field];
+        });
+
+        if (updates.role !== undefined && !VALID_ROLES.includes(updates.role)) {
+            return res.status(400).json({ success: false, message: 'Invalid role' });
+        }
+        if (updates.email !== undefined) {
+            updates.email = String(updates.email).trim().toLowerCase();
+            if (!updates.email) return res.status(400).json({ success: false, message: 'Email cannot be empty' });
+        }
+        if (updates.isActive !== undefined && typeof updates.isActive !== 'boolean') {
+            return res.status(400).json({ success: false, message: 'isActive must be a boolean' });
+        }
+        if (req.params.id === req.user.id && updates.role !== undefined && updates.role !== 'admin') {
+            return res.status(400).json({ success: false, message: 'Cannot remove your own admin role' });
+        }
+
         const user = await prisma.user.update({
             where: { id: req.params.id },
-            data: req.body,
+            data: updates,
             select: { id: true, name: true, email: true, role: true }
         });
         res.json({ success: true, user });

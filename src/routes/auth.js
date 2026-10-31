@@ -4,6 +4,9 @@ const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
 const { generateToken, generateRefreshToken } = require('../utils/jwt');
 
+// Roles a user may pick for themselves at sign-up. 'admin' is never self-assignable.
+const SELF_ASSIGNABLE_ROLES = ['player', 'coach'];
+
 // Helper to remove password from user object
 const toPublicJSON = (user) => {
     const { password, ...publicUser } = user;
@@ -19,6 +22,9 @@ router.post('/register', async (req, res) => {
 
         if (!normalizedName || !normalizedEmail || !password) {
             return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+        }
+        if (role !== undefined && !SELF_ASSIGNABLE_ROLES.includes(role)) {
+            return res.status(400).json({ success: false, message: 'Invalid role' });
         }
         if (password.length < 6) {
             return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });

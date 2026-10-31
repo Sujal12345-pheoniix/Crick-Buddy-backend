@@ -3,6 +3,7 @@ const IORedis = require('ioredis');
 const prisma = require('./prisma');
 const axios = require('axios');
 const FormData = require('form-data');
+const { aiAuthHeaders } = require('./aiAuth');
 
 // Download a file from a URL into a Buffer (used for Cloudinary-stored retries)
 async function downloadBuffer(urlStr) {
@@ -76,7 +77,7 @@ async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts =
             
             const startTime = Date.now();
             const response = await axios.post(endpoint, formData, {
-                headers: formData.getHeaders(),
+                headers: { ...formData.getHeaders(), ...aiAuthHeaders() },
                 timeout: 300000, // 5 min timeout per attempt
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const { protect } = require('../middleware/auth');
+const { aiAuthHeaders } = require('../utils/aiAuth');
 
 const cricketKnowledge = {
     'batting stance': 'A good batting stance requires feet shoulder-width apart, knees slightly bent, weight balanced on balls of feet, bat held near the crease with soft hands.',
@@ -29,7 +30,7 @@ router.post('/', protect, async (req, res) => {
                     battingStyle: req.user.battingStyle,
                     bowlingStyle: req.user.bowlingStyle
                 }
-            }, { timeout: 30000 });
+            }, { timeout: 30000, headers: aiAuthHeaders() });
 
             return res.json({ success: true, reply: response.data.reply, source: 'ai' });
         } catch (aiErr) {
