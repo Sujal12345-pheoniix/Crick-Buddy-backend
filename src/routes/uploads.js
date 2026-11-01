@@ -4,7 +4,7 @@ const path = require('path');
 const prisma = require('../utils/prisma');
 const upload = require('../config/multer');
 const { protect } = require('../middleware/auth');
-const { uploadBuffer, deleteFile } = require('../config/cloudinary');
+const { enqueueAnalysis, buildJobData, resetRecoveryAttempts } = require('../utils/queue');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
@@ -44,15 +44,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
         }
 
         const isLocal = process.env.STORAGE_MODE === 'local';
-        let fileUrl;
-        let filePath = null;
-
-        if (isLocal) {
-            fileUrl = `/uploads/${req.file.filename}`;
-            filePath = req.file.path;
-        } else {
-            fileUrl = req.file.path;
-        }
+        const fileUrl = isLocal ? `/uploads/${req.file.filename}` : req.file.path;
         
         const isVideo = req.file.mimetype.startsWith('video/') ||
             VIDEO_EXTENSIONS.has(path.extname(req.file.originalname).toLowerCase());
@@ -79,17 +71,8 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
             data: { totalUploads: { increment: 1 } }
         });
 
-        // ── Queue AI analysis — pass Cloudinary URL or local filePath ──────────
-        const { enqueueAnalysis } = require('../utils/queue');
-        const enqueueResult = await enqueueAnalysis({
-            uploadId: uploadDoc.id,
-            fileUrl,                        
-            filePath,
-            fileName: req.file.originalname,
-            mimeType: req.file.mimetype,
-            type,
-            userId: req.user.id
-        });
+        // ── Queue AI analysis — local file path or Cloudinary URL ─────────────
+        const enqueueResult = await enqueueAnalysis(buildJobData(uploadDoc));
 
         if (!enqueueResult) {
             throw new Error('Analysis queue did not accept the job');
@@ -144,9 +127,9 @@ router.post('/:id/retry', protect, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Upload not found' });
         }
 
-        const isLocal = process.env.STORAGE_MODE === 'local';
+        const isLocalFile = uploadDoc.fileUrl && uploadDoc.fileUrl.startsWith('/uploads/');
 
-        if (!isLocal && (!uploadDoc.fileUrl || !uploadDoc.fileUrl.startsWith('https://'))) {
+        if (!isLocalFile && (!uploadDoc.fileUrl || !uploadDoc.fileUrl.startsWith('https://'))) {
             return res.status(400).json({
                 success: false,
                 message: 'No cloud URL available for this upload. Please re-upload the file.'
@@ -159,21 +142,8 @@ router.post('/:id/retry', protect, async (req, res) => {
             data: { status: 'pending', processingProgress: 0, errorMessage: null }
         });
 
-        let filePath = null;
-        if (isLocal) {
-            filePath = path.join(__dirname, '../../uploads', uploadDoc.filename);
-        }
-
-        const { enqueueAnalysis } = require('../utils/queue');
-        await enqueueAnalysis({
-            uploadId: uploadDoc.id,
-            fileUrl: uploadDoc.fileUrl,   
-            filePath,
-            fileName: uploadDoc.originalName,
-            mimeType: uploadDoc.mimeType,
-            type: uploadDoc.type,
-            userId: req.user.id
-        });
+        resetRecoveryAttempts(uploadDoc.id);
+        await enqueueAnalysis(buildJobData(uploadDoc));
 
         return res.json({
             success: true,

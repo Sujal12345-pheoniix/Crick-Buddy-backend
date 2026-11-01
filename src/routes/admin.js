@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const prisma = require('../utils/prisma');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -54,10 +56,10 @@ router.get('/stats', async (req, res) => {
             const month = date.getMonth() + 1;
             
             const start = new Date(year, month - 1, 1);
-            const end = new Date(year, month, 0);
+            const end = new Date(year, month, 1);
             
             const count = await prisma.user.count({
-                where: { createdAt: { gte: start, lte: end } }
+                where: { createdAt: { gte: start, lt: end } }
             });
             signupsByMonth.push({ _id: { year, month }, count });
         }
@@ -179,16 +181,137 @@ router.put('/users/:id', async (req, res) => {
     }
 });
 
+// Deletes reports matching `where` together with every row that references them.
+function deleteReportsOps(where) {
+    const byReport = { report: where };
+    return [
+        prisma.faultLog.deleteMany({ where: byReport }),
+        prisma.aggregateMetric.deleteMany({ where: byReport }),
+        prisma.rawFrameMetric.deleteMany({ where: byReport }),
+        prisma.progressEntry.deleteMany({ where: byReport }),
+        prisma.analysisReport.deleteMany({ where }),
+    ];
+}
+
+function deleteUploadsOps(where) {
+    return [
+        ...deleteReportsOps({ upload: where }),
+        prisma.rawFrameMetric.deleteMany({ where: { upload: where } }),
+        prisma.upload.deleteMany({ where }),
+    ];
+}
+
+// Best-effort removal of the stored media file (local disk or Cloudinary).
+async function removeStoredFile(upload) {
+    try {
+        if (upload.fileUrl?.startsWith('/uploads/')) {
+            const filePath = path.join(__dirname, '../../uploads', path.basename(upload.filename));
+            await fs.promises.unlink(filePath).catch(() => {});
+        } else if (upload.fileUrl?.includes('res.cloudinary.com')) {
+            const match = upload.fileUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z0-9]+$/i);
+            if (match) {
+                const { deleteFile } = require('../config/cloudinary');
+                await deleteFile(match[1], upload.fileUrl.includes('/video/') ? 'video' : 'image');
+            }
+        }
+    } catch (err) {
+        console.warn(`⚠️  Could not remove stored file for upload ${upload.id}: ${err.message}`);
+    }
+}
+
 router.delete('/users/:id', async (req, res) => {
     try {
         if (req.params.id === req.user.id) return res.status(400).json({ success: false, message: 'Cannot delete yourself' });
-        
-        await prisma.progressEntry.deleteMany({ where: { userId: req.params.id } });
-        await prisma.analysisReport.deleteMany({ where: { userId: req.params.id } });
-        await prisma.upload.deleteMany({ where: { userId: req.params.id } });
-        await prisma.user.delete({ where: { id: req.params.id } });
-        
+
+        const userId = req.params.id;
+        const uploads = await prisma.upload.findMany({ where: { userId } });
+        await prisma.$transaction([
+            ...deleteReportsOps({ userId }),
+            ...deleteUploadsOps({ userId }),
+            prisma.progressEntry.deleteMany({ where: { userId } }),
+            prisma.matchPerformanceEntry.deleteMany({ where: { userId } }),
+            prisma.user.delete({ where: { id: userId } }),
+        ]);
+        await Promise.all(uploads.map(removeStoredFile));
+
         res.json({ success: true, message: 'User and all data deleted' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ─── Upload & Report Management ─────────────────────────────────────────────
+function pageParams(query) {
+    const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 100);
+    const page = Math.max(parseInt(query.page, 10) || 1, 1);
+    return { limit, page, skip: (page - 1) * limit };
+}
+
+router.get('/uploads', async (req, res) => {
+    try {
+        const { limit, page, skip } = pageParams(req.query);
+        const [total, uploads] = await Promise.all([
+            prisma.upload.count(),
+            prisma.upload.findMany({
+                orderBy: { createdAt: 'desc' },
+                skip,
+                take: limit,
+                include: { user: { select: { name: true, email: true } } }
+            })
+        ]);
+        res.json({ success: true, uploads, total, pages: Math.max(1, Math.ceil(total / limit)), currentPage: page });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+router.delete('/uploads/:id', async (req, res) => {
+    try {
+        const upload = await prisma.upload.findUnique({ where: { id: req.params.id } });
+        if (!upload) return res.status(404).json({ success: false, message: 'Upload not found' });
+
+        await prisma.$transaction([
+            ...deleteUploadsOps({ id: upload.id }),
+            prisma.user.update({ where: { id: upload.userId }, data: { totalUploads: { decrement: 1 } } }),
+        ]);
+        await removeStoredFile(upload);
+        res.json({ success: true, message: 'Upload deleted' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+router.get('/reports', async (req, res) => {
+    try {
+        const { limit, page, skip } = pageParams(req.query);
+        const [total, reports] = await Promise.all([
+            prisma.analysisReport.count(),
+            prisma.analysisReport.findMany({
+                orderBy: { createdAt: 'desc' },
+                skip,
+                take: limit,
+                select: {
+                    id: true, type: true, overallScore: true, createdAt: true, uploadId: true,
+                    user: { select: { name: true, email: true } }
+                }
+            })
+        ]);
+        res.json({ success: true, reports, total, pages: Math.max(1, Math.ceil(total / limit)), currentPage: page });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+router.delete('/reports/:id', async (req, res) => {
+    try {
+        const report = await prisma.analysisReport.findUnique({ where: { id: req.params.id } });
+        if (!report) return res.status(404).json({ success: false, message: 'Report not found' });
+
+        await prisma.$transaction([
+            ...deleteReportsOps({ id: report.id }),
+            prisma.user.update({ where: { id: report.userId }, data: { totalReports: { decrement: 1 } } }),
+        ]);
+        res.json({ success: true, message: 'Report deleted' });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }

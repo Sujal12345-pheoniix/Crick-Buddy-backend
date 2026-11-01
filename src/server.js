@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const app = require('./app');
+const { startRecoverySweep } = require('./utils/queue');
 
 const PORT = process.env.PORT || 5000;
 
@@ -8,4 +9,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`✅ Crick-Buddy Backend running on PORT ${PORT} (${process.env.NODE_ENV || 'development'})`);
     console.log(`✅ AI Service URL: ${process.env.AI_SERVICE_URL}`);
+    startRecoverySweep();
 });

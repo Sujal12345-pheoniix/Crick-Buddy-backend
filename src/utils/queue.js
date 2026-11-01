@@ -3,20 +3,15 @@ const IORedis = require('ioredis');
 const prisma = require('./prisma');
 const axios = require('axios');
 const FormData = require('form-data');
+const fs = require('fs');
+const path = require('path');
 const { aiAuthHeaders } = require('./aiAuth');
 
-// Download a file from a URL into a Buffer (used for Cloudinary-stored retries)
-async function downloadBuffer(urlStr) {
-    console.log(`[CLOUDINARY:START] Fetching file bytes from URL: ${urlStr}`);
-    try {
-        const response = await axios.get(urlStr, { responseType: 'arraybuffer', timeout: 120000 });
-        console.log(`[CLOUDINARY:SUCCESS] Downloaded ${response.data.byteLength} bytes from Cloudinary`);
-        return Buffer.from(response.data);
-    } catch (err) {
-        console.error(`[CLOUDINARY:ERROR] Failed to download file from Cloudinary: ${err.message}`);
-        throw err;
-    }
-}
+const UPLOADS_DIR = path.join(__dirname, '../../uploads');
+
+// Per-attempt timeout for the AI call. Must exceed the AI service's own
+// REQUEST_TIMEOUT_SECS (480s) so the backend never gives up while it is still working.
+const AI_REQUEST_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 600000;
 
 const dns = require('dns').promises;
 const url = require('url');
@@ -38,47 +33,42 @@ async function validateAiServiceUrl(aiUrl) {
     }
 }
 
-function isTransientAiServiceError(err) {
+// The AI service is unreachable or still waking up (e.g. a sleeping free-tier instance).
+// Retrying makes sense; a timeout does not, because the service may still be crunching the first request.
+function isServiceWakingError(err) {
     const status = err?.response?.status;
-    const message = String(err?.message || '').toLowerCase();
-
     return (
-        err?.code === 'ECONNABORTED' ||
-        err?.code === 'ETIMEDOUT' ||
         err?.code === 'ECONNREFUSED' ||
         err?.code === 'ECONNRESET' ||
         err?.code === 'EPIPE' ||
         err?.code === 'UND_ERR_SOCKET' ||
-        message.includes('socket hang up') ||
-        message.includes('socket closed') ||
-        message.includes('network error') ||
-        message.includes('timeout') ||
+        /socket hang up/i.test(err?.message || '') ||
         status === 502 ||
-        status === 503 ||
-        status === 504
+        status === 503
     );
 }
 
-// Wrapper for Axios request to AI Service with 3 attempts and exponential backoff
-async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts = 3) {
+// POST to the AI service with backoff. `buildForm` is called for every attempt because a
+// multipart stream can only be sent once — reusing it would post an empty body on retry.
+async function callAiWithRetry(endpoint, buildForm, uploadId, maxAttempts = 4) {
     const aiUrl = process.env.AI_SERVICE_URL;
-    
+
     console.log(`[AI_REQUEST:START] Starting AI analysis for upload ${uploadId} to endpoint: ${endpoint}`);
-    
-    // Step 6: Validate AI_SERVICE_URL
+
     await validateAiServiceUrl(aiUrl);
 
     let lastError = null;
-    let delay = 2000; // start with 2 seconds
+    let delay = 5000;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             console.log(`[AI_REQUEST:ATTEMPT] Attempt ${attempt} of ${maxAttempts} to call AI service for upload ${uploadId}`);
-            
+
+            const formData = buildForm();
             const startTime = Date.now();
             const response = await axios.post(endpoint, formData, {
                 headers: { ...formData.getHeaders(), ...aiAuthHeaders() },
-                timeout: 300000, // 5 min timeout per attempt
+                timeout: AI_REQUEST_TIMEOUT_MS,
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,
             });
@@ -110,6 +100,7 @@ async function callAiWithRetry(endpoint, formData, uploadId, type, maxAttempts =
             
             console.warn(`[AI_REQUEST:FAIL] Attempt ${attempt} failed with ${errorType} for upload ${uploadId}. Error: ${err.message}`);
             
+            if (!isServiceWakingError(err)) break;
             if (attempt < maxAttempts) {
                 console.log(`[AI_REQUEST:RETRY] Retrying in ${delay}ms...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
@@ -183,13 +174,14 @@ function normalizeAnalysis(type, raw) {
 
     return {
         ...analysis,
-        strengths: toStringList(analysis.strengths, ['Consistent effort shown in current session.']),
-        weaknesses: toStringList(analysis.weaknesses, ['No severe technical issue detected, keep refining execution.']),
-        mistakes: toStringList(analysis.mistakes, ['Minor timing inconsistency under pressure.']),
-        improvement_suggestions: toStringList(analysis.improvement_suggestions, ['Continue focused drills and weekly video review.']),
-        training_drills: toStringList(analysis.training_drills, ['3 focused drill blocks per session with measurable targets.']),
-        recommendations: toStringList(analysis.recommendations, ['Prioritize recovery, hydration, and quality warm-up routines.']),
-        best_practices: toStringList(analysis.best_practices, ['Track one key metric after each practice session.']),
+        // No invented fallback text: an empty list means the engine had nothing to say.
+        strengths: toStringList(analysis.strengths),
+        weaknesses: toStringList(analysis.weaknesses),
+        mistakes: toStringList(analysis.mistakes),
+        improvement_suggestions: toStringList(analysis.improvement_suggestions),
+        training_drills: toStringList(analysis.training_drills),
+        recommendations: toStringList(analysis.recommendations),
+        best_practices: toStringList(analysis.best_practices),
         overall_score: overallScore,
         landmarks: analysis.landmarks ?? null
     };
@@ -273,42 +265,47 @@ function getRedisConnection() {
 // ─── Worker Job Handler ─────────────────────────────────────────────────────
 // Supports both in-memory buffer (initial upload) and Cloudinary URL (retry).
 async function processJob(job) {
-    const { uploadId, fileBuffer: rawBuffer, fileUrl, fileName, mimeType, type, userId } = job.data;
+    const { uploadId, fileUrl, filePath, fileName, mimeType, type, userId } = job.data;
 
     try {
         await prisma.upload.update({
             where: { id: uploadId },
-            data: { status: 'processing', processingProgress: 10 }
+            data: { status: 'processing', processingProgress: 10, errorMessage: null }
         });
 
         const aiUrl = process.env.AI_SERVICE_URL;
         const endpoint = `${aiUrl}/analyze/${type}`;
 
-        let fileBuffer = rawBuffer;
-        if (!fileBuffer && process.env.STORAGE_MODE === 'local' && job.data.filePath) {
-            const fs = require('fs');
-            if (fs.existsSync(job.data.filePath)) {
-                fileBuffer = fs.readFileSync(job.data.filePath);
-            } else {
-                console.warn(`⚠️  Local file not found at path: ${job.data.filePath}`);
-            }
+        // Locally stored files are streamed from disk; cloud files are fetched by the AI service.
+        const hasLocalFile = Boolean(filePath && fs.existsSync(filePath));
+        if (filePath && !hasLocalFile) {
+            console.warn(`⚠️  Local file not found at path: ${filePath}`);
+        }
+        if (!hasLocalFile && !(fileUrl && fileUrl.startsWith('https://'))) {
+            throw new Error('No local file and no cloud URL available. Re-upload the file to retry.');
         }
 
-        const formData = new FormData();
-        
-        if (fileBuffer) {
-            const processedBuffer = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(fileBuffer);
-            formData.append('file', processedBuffer, {
-                filename: fileName || `upload.${type === 'posture' ? 'jpg' : 'mp4'}`,
-                contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
-            });
-        } else if (fileUrl && fileUrl.startsWith('https://')) {
-            formData.append('fileUrl', fileUrl);
-        } else {
-            throw new Error('No file buffer and no cloud URL available. Re-upload the file to retry.');
-        }
-        
-        formData.append('upload_id', uploadId);
+        // Handedness lets the engine track the correct (front/bowling) side of the body.
+        const profile = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { battingStyle: true, bowlingStyle: true }
+        }).catch(() => null);
+
+        const buildForm = () => {
+            const formData = new FormData();
+            if (hasLocalFile) {
+                formData.append('file', fs.createReadStream(filePath), {
+                    filename: fileName || path.basename(filePath),
+                    contentType: mimeType || (type === 'posture' ? 'image/jpeg' : 'video/mp4'),
+                });
+            } else {
+                formData.append('fileUrl', fileUrl);
+            }
+            formData.append('upload_id', uploadId);
+            if (profile?.battingStyle) formData.append('batting_style', profile.battingStyle);
+            if (profile?.bowlingStyle) formData.append('bowling_style', profile.bowlingStyle);
+            return formData;
+        };
 
         await prisma.upload.update({
             where: { id: uploadId },
@@ -317,10 +314,10 @@ async function processJob(job) {
 
         let analysis;
         try {
-            analysis = await callAiWithRetry(endpoint, formData, uploadId, type);
+            analysis = await callAiWithRetry(endpoint, buildForm, uploadId);
         } catch (aiErr) {
-            if (isTransientAiServiceError(aiErr)) {
-                // AI service timed out. Keep upload as pending for retry.
+            if (isServiceWakingError(aiErr)) {
+                // AI service unreachable. Keep upload as pending; the recovery sweep re-queues it.
                 // Do NOT generate fake scores — real analysis requires real pose detection.
                 console.warn(`⚠️  AI service temporarily unavailable for upload ${uploadId}. Keeping as pending for retry.`);
                 await prisma.upload.update({
@@ -335,6 +332,10 @@ async function processJob(job) {
                 });
                 return { success: false, reason: 'AI service unavailable, status kept as pending' };
             } else {
+                const timedOut = aiErr.code === 'ECONNABORTED' || aiErr.response?.status === 504;
+                if (timedOut) {
+                    throw new Error('Analysis took too long. Upload a shorter clip (under 30 seconds) focused on a single shot or delivery.');
+                }
                 const d = aiErr.response?.data?.detail;
                 const reason =
                     (typeof d === 'string' ? d : d ? JSON.stringify(d) : null) ||
@@ -376,7 +377,7 @@ async function processJob(job) {
             // ── Batting Single-Frame Metrics ──────────────────────────────────────
             stanceScore: analysis.batting_metrics?.stanceScore ?? null,
             batSwingAngle: analysis.batting_metrics?.batSwingAngle ?? null,
-            wristPositionScore: analysis.batting_metrics?.wristPositionScore ?? null,
+            wristPositionScore: analysis.batting_metrics?.wristPositionScore ?? analysis.bowling_metrics?.wristPositionScore ?? null,
             headPosition: analysis.batting_metrics?.headPosition ?? null,
             headPositionScore: analysis.batting_metrics?.headPositionScore ?? null,
             shotType: analysis.batting_metrics?.shotType ?? null,
@@ -583,6 +584,7 @@ async function processJob(job) {
             data: { status: 'completed', processingProgress: 100, errorMessage: null }
         });
         console.log(`[DB_WRITE:INFO] Updated upload ${uploadId} status to completed`);
+        recoveryAttempts.delete(uploadId);
 
         return { success: true, reportId: report.id };
     } catch (err) {
@@ -597,7 +599,7 @@ async function processJob(job) {
         }
         console.error('❌ Job error processing video:', errorMessage);
         
-        const isUnavailable = isTransientAiServiceError(err);
+        const isUnavailable = isServiceWakingError(err);
         
         const status = isUnavailable ? 'pending' : 'failed';
         const finalErrorMessage = isUnavailable 
@@ -627,7 +629,7 @@ function initQueue() {
         analysisQueue = new Queue('video-analysis', {
             connection: conn,
             defaultJobOptions: {
-                attempts: 2,
+                attempts: 1,   // transient AI outages are re-queued by the recovery sweep
                 backoff: { type: 'exponential', delay: 8000 },
                 removeOnComplete: true,
             }
@@ -635,7 +637,7 @@ function initQueue() {
         analysisWorker = new Worker('video-analysis', processJob, {
             connection: conn,
             concurrency: 1,         // 1 at a time — prevents RAM overload on free tier
-            lockDuration: 660000,   // 11 min lock — longer than our 10-min axios timeout
+            lockDuration: 660000,   // 11 min lock, renewed below while the AI call runs
             lockRenewTime: 120000,  // Renew lock every 2 min to keep job alive
         });
 
@@ -662,48 +664,132 @@ if (isQueueEnabled()) {
     console.log('ℹ️  Analysis queue disabled (ENABLE_ANALYSIS_QUEUE!=true). Using direct processing mode.');
 }
 
-// ─── Fallback: direct processing without queue ───────────────────────────────
-async function processDirectly(uploadId, fileBuffer, fileUrl, fileName, mimeType, type, userId) {
-    return processJob({ data: { uploadId, fileBuffer, fileUrl, fileName, mimeType, type, userId } });
+// ─── Direct mode: in-process serial runner ───────────────────────────────────
+// Without Redis, jobs still run one (or DIRECT_CONCURRENCY) at a time so a burst of
+// uploads cannot overload the CPU-bound AI service.
+const DIRECT_CONCURRENCY = Math.max(1, Number(process.env.DIRECT_CONCURRENCY) || 1);
+const activeUploads = new Set();
+const pendingJobs = [];
+let runningJobs = 0;
+
+function drainDirectQueue() {
+    while (runningJobs < DIRECT_CONCURRENCY && pendingJobs.length) {
+        const data = pendingJobs.shift();
+        runningJobs++;
+        processJob({ data })
+            .catch(err => console.error(`❌ Direct analysis failed for upload ${data.uploadId}:`, err.message))
+            .finally(() => {
+                runningJobs--;
+                activeUploads.delete(data.uploadId);
+                drainDirectQueue();
+            });
+    }
+}
+
+function runDirectly(data) {
+    if (activeUploads.has(data.uploadId)) {
+        return { success: true, processed: 'already-queued' };
+    }
+    activeUploads.add(data.uploadId);
+    pendingJobs.push(data);
+    drainDirectQueue();
+    return { success: true, processed: 'directly', position: pendingJobs.length };
+}
+
+// Build the job payload for an upload row (used by upload, retry and recovery).
+function buildJobData(upload) {
+    const isLocalFile = upload.fileUrl && upload.fileUrl.startsWith('/uploads/');
+    return {
+        uploadId: upload.id,
+        fileUrl: upload.fileUrl,
+        filePath: isLocalFile ? path.join(UPLOADS_DIR, path.basename(upload.filename)) : null,
+        fileName: upload.originalName,
+        mimeType: upload.mimeType,
+        type: upload.type,
+        userId: upload.userId,
+    };
 }
 
 // ─── Exported enqueue function ───────────────────────────────────────────────
 async function enqueueAnalysis(data) {
-    const queueEnabled = isQueueEnabled();
-
-    if (!queueEnabled) {
-        console.warn(`⚠️  Queue disabled. Processing directly for upload: ${data.uploadId}`);
-        processDirectly(data.uploadId, data.fileBuffer, data.fileUrl, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
-            console.error('❌ Direct analysis fatal error:', err.message);
-        });
-        return { success: true, processed: 'directly' };
+    if (isQueueEnabled() && analysisQueue) {
+        try {
+            console.log(`📡 Queuing analysis for upload: ${data.uploadId}`);
+            // jobId = uploadId de-duplicates re-queues of the same upload.
+            return await analysisQueue.add('analyze-video', data, {
+                jobId: data.uploadId,
+                attempts: 1,
+                removeOnComplete: true,
+                removeOnFail: true,
+            });
+        } catch (err) {
+            console.error('❌ Redis queue failed at runtime, falling back to direct mode:', err.message);
+        }
     }
 
+    console.log(`⚙️  Processing directly for upload: ${data.uploadId}`);
+    return runDirectly(data);
+}
+
+// ─── Recovery sweep ──────────────────────────────────────────────────────────
+// Uploads left 'pending' (AI service was down) or stuck 'processing' (server restarted
+// mid-job) are re-queued, up to MAX_RECOVERY_ATTEMPTS, then marked failed.
+const MAX_RECOVERY_ATTEMPTS = Number(process.env.MAX_RECOVERY_ATTEMPTS) || 3;
+const STALE_AFTER_MS = 2 * 60 * 1000;
+const recoveryAttempts = new Map();
+
+async function recoverStalledUploads({ includeProcessing = false } = {}) {
     try {
-        if (analysisQueue) {
-            console.log(`📡 Queuing analysis for upload: ${data.uploadId}`);
-            return await analysisQueue.add('analyze-video', data, {
-                attempts: 2,
-                backoff: { type: 'exponential', delay: 8000 },
-                removeOnComplete: true,
-                removeOnFail: false,
-            });
+        const cutoff = new Date(Date.now() - STALE_AFTER_MS);
+        const statuses = includeProcessing ? ['pending', 'processing'] : ['pending'];
+        const stalled = await prisma.upload.findMany({
+            where: { status: { in: statuses }, updatedAt: { lt: cutoff } },
+            orderBy: { createdAt: 'asc' },
+            take: 20,
+        });
+
+        for (const upload of stalled) {
+            if (activeUploads.has(upload.id)) continue;
+            if (isQueueEnabled() && analysisQueue) {
+                const queued = await analysisQueue.getJob(upload.id).catch(() => null);
+                if (queued) continue;
+            }
+
+            const attempts = (recoveryAttempts.get(upload.id) || 0) + 1;
+            if (attempts > MAX_RECOVERY_ATTEMPTS) {
+                recoveryAttempts.delete(upload.id);
+                await prisma.upload.update({
+                    where: { id: upload.id },
+                    data: {
+                        status: 'failed',
+                        processingProgress: 0,
+                        errorMessage: 'AI analysis service did not respond after several attempts. Use Retry to try again.',
+                    },
+                });
+                continue;
+            }
+            recoveryAttempts.set(upload.id, attempts);
+            console.log(`🔁 Re-queuing stalled upload ${upload.id} (attempt ${attempts}/${MAX_RECOVERY_ATTEMPTS})`);
+            // Touch updatedAt so the next sweep waits STALE_AFTER_MS again.
+            await prisma.upload.update({ where: { id: upload.id }, data: { status: 'pending' } });
+            await enqueueAnalysis(buildJobData(upload));
         }
     } catch (err) {
-        console.error('❌ Redis queue failed at runtime:', err.message);
-    }
-    
-    // Fallback: run directly in the same process (no Redis)
-    console.warn(`⚠️  Processing directly (Queue Offline) for upload: ${data.uploadId}`);
-    try {
-        processDirectly(data.uploadId, data.fileBuffer, data.fileUrl, data.fileName, data.mimeType, data.type, data.userId).catch(err => {
-            console.error('❌ Direct analysis fatal error:', err.message);
-        });
-        return { success: true, processed: 'directly' };
-    } catch (fallbackErr) {
-        console.error('❌ Fallback failed:', fallbackErr.message);
-        throw fallbackErr;
+        console.warn('⚠️  Upload recovery sweep failed:', err.message);
     }
 }
 
-module.exports = { analysisQueue, analysisWorker, enqueueAnalysis };
+let sweepTimer = null;
+function startRecoverySweep(intervalMs = 60 * 1000) {
+    if (sweepTimer) return;
+    // On boot, anything still 'processing' belongs to a job that died with the old process.
+    recoverStalledUploads({ includeProcessing: true });
+    sweepTimer = setInterval(() => recoverStalledUploads(), intervalMs);
+    sweepTimer.unref();
+}
+
+function resetRecoveryAttempts(uploadId) {
+    recoveryAttempts.delete(uploadId);
+}
+
+module.exports = { enqueueAnalysis, buildJobData, startRecoverySweep, resetRecoveryAttempts };

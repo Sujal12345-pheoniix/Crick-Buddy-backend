@@ -27,4 +27,7 @@ const generateRefreshToken = (id) => {
     return jwt.sign({ id }, refreshSecret, { expiresIn: '30d' });
 };
 
-module.exports = { generateToken, generateRefreshToken };
+// Verify with the same resolved secret used for signing (including the dev fallback).
+const verifyToken = (token) => jwt.verify(token, accessSecret);
+
+module.exports = { generateToken, generateRefreshToken, verifyToken };

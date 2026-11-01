@@ -141,7 +141,7 @@ async function seedFallbackTournaments() {
 
     for (const row of rows) {
         const exists = await prisma.tournament.findFirst({
-            where: { name: row.name, startDate: row.startDate }
+            where: { name: row.name }
         });
         if (!exists) {
             await prisma.tournament.create({ data: row });
@@ -169,15 +169,12 @@ router.get('/', protect, async (req, res) => {
             orderBy: { startDate: 'asc' }
         });
 
-        if (!tournaments.length) {
-            await seedFallbackTournaments();
-        }
-
         let finalRows = tournaments;
-        if (!finalRows.length) {
-            finalRows = await prisma.tournament.findMany({
-                orderBy: { startDate: 'asc' }
-            });
+        const hasFilters = Boolean((status && status !== 'all') || q || location);
+        // Seed demo data only when the table is genuinely empty, and never discard the user's filters.
+        if (!finalRows.length && !hasFilters && (await prisma.tournament.count()) === 0) {
+            await seedFallbackTournaments();
+            finalRows = await prisma.tournament.findMany({ orderBy: { startDate: 'asc' } });
         }
 
         const capped = Number(limit) > 0 ? finalRows.slice(0, Number(limit)) : finalRows;
@@ -213,7 +210,7 @@ router.get('/discover', protect, async (req, res) => {
             take: 100
         });
 
-        if (!upcoming.length) {
+        if (!upcoming.length && (await prisma.tournament.count()) === 0) {
             await seedFallbackTournaments();
             upcoming = await prisma.tournament.findMany({
                 where: { status: { in: ['upcoming', 'ongoing'] } },

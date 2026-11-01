@@ -95,7 +95,7 @@ async function seedFallbackMatches() {
 
     for (const row of fallback) {
         const exists = await prisma.match.findFirst({
-            where: { title: row.title, date: row.date }
+            where: { title: row.title }
         });
         if (!exists) {
             await prisma.match.create({ data: row });
