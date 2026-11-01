@@ -95,6 +95,7 @@ function formatReport(report) {
             headPositionScore: report.headPositionScore,
             wristPositionScore: report.wristPositionScore,
             shotType: report.shotType,
+            balanceScore: report.balanceScore,
             overallBattingScore: report.overallBattingScore
         } : null,
         bowlingMetrics: report.type === 'bowling' ? {

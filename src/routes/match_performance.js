@@ -202,11 +202,11 @@ router.post('/', protect, async (req, res) => {
 router.get('/', protect, async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-        const entries = await prisma.matchPerformanceEntry.findMany({
+        const entries = (await prisma.matchPerformanceEntry.findMany({
             where: { userId: req.user.id },
-            orderBy: { matchDate: 'asc' },
+            orderBy: { matchDate: 'desc' },
             take: limit,
-        });
+        })).reverse();
         res.json({ success: true, entries, count: entries.length });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });

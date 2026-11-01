@@ -117,16 +117,18 @@ function generateGrowthFeedback(current, previous) {
 // GET /api/progress?type=batting
 router.get('/', protect, async (req, res) => {
     try {
-        const { type, limit = 30 } = req.query;
+        const { type } = req.query;
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 200);
         
         const query = { userId: req.user.id };
         if (type) query.type = type;
 
-        const entries = await prisma.progressEntry.findMany({
+        // Latest N entries, returned oldest → newest for charting.
+        const entries = (await prisma.progressEntry.findMany({
             where: query,
-            orderBy: { date: 'asc' },
-            take: Number(limit)
-        });
+            orderBy: { date: 'desc' },
+            take: limit
+        })).reverse();
 
         res.json({ success: true, entries });
     } catch (err) {
@@ -160,11 +162,11 @@ router.get('/summary', protect, async (req, res) => {
 router.get('/match-performance', protect, async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-        const entries = await prisma.matchPerformanceEntry.findMany({
+        const entries = (await prisma.matchPerformanceEntry.findMany({
             where: { userId: req.user.id },
-            orderBy: { matchDate: 'asc' },
+            orderBy: { matchDate: 'desc' },
             take: limit
-        });
+        })).reverse();
         res.json({ success: true, entries });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
