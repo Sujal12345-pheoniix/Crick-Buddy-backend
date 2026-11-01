@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const dns = require('dns').promises;
 const url = require('url');
+const { aiServiceUrl } = require('../utils/aiService');
 
 // GET /api/health — Simple backend self health check
 router.get('/health', async (req, res) => {
@@ -15,7 +16,7 @@ router.get('/health', async (req, res) => {
 
 // GET /api/status — Detailed diagnosis of backend + AI service
 router.get('/status', async (req, res) => {
-    const aiUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+    const aiUrl = aiServiceUrl() || 'http://localhost:8000';
     const statusInfo = {
         backend: {
             status: 'ok',
@@ -63,6 +64,9 @@ router.get('/status', async (req, res) => {
         } else if (err.code === 'ECONNREFUSED') {
             statusInfo.aiService.status = 'connection_refused';
             statusInfo.aiService.details = `Port connection refused`;
+        } else if ([429, 502, 503].includes(err.response?.status)) {
+            statusInfo.aiService.status = 'service_sleeping';
+            statusInfo.aiService.details = `HTTP ${err.response.status}: AI service is starting up`;
         } else if (err.response) {
             statusInfo.aiService.status = 'invalid_response';
             statusInfo.aiService.details = `HTTP ${err.response.status}: ${err.message}`;

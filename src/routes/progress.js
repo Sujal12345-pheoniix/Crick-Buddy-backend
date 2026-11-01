@@ -3,7 +3,7 @@ const router = express.Router();
 const { protect } = require('../middleware/auth');
 const prisma = require('../utils/prisma');
 const axios = require('axios');
-const { aiAuthHeaders } = require('../utils/aiAuth');
+const { aiServiceUrl, aiAuthHeaders } = require('../utils/aiService');
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -289,8 +289,7 @@ router.post('/match-performance', protect, async (req, res) => {
 
         let feedback = generateGrowthFeedback(scores, previousComputed);
         try {
-            const aiUrl = process.env.AI_SERVICE_URL;
-            const aiResp = await axios.post(`${aiUrl}/match-growth`, {
+            const aiResp = await axios.post(`${aiServiceUrl()}/match-growth`, {
                 latest: { matchDate, runs: parsedRuns, balls: parsedBalls, wickets: parsedWickets, oversBowled: parsedOversBowled, runsConceded: parsedRunsConceded, catches: parsedCatches, stumpings: parsedStumpings, computed: scores },
                 previous: previousComputed ? { computed: previousComputed } : null,
                 history: []

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const { protect } = require('../middleware/auth');
-const { aiAuthHeaders } = require('../utils/aiAuth');
+const { aiServiceUrl, aiAuthHeaders } = require('../utils/aiService');
 
 const cricketKnowledge = {
     'batting stance': 'A good batting stance requires feet shoulder-width apart, knees slightly bent, weight balanced on balls of feet, bat held near the crease with soft hands.',
@@ -19,8 +19,7 @@ router.post('/', protect, async (req, res) => {
 
         // Try to forward to AI service
         try {
-            const aiUrl = process.env.AI_SERVICE_URL;
-            const response = await axios.post(`${aiUrl}/chatbot`, {
+            const response = await axios.post(`${aiServiceUrl()}/chatbot`, {
                 message,
                 history,
                 user_profile: {
