@@ -1,78 +1,63 @@
 require('dotenv').config();
-const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
+const prisma = require('../utils/prisma');
 
-const prisma = new PrismaClient();
+// Demo accounts used by the login page's "Try with demo credentials" button.
+// Accounts that already exist are left untouched — this script never deletes data.
+const DEMO_USERS = [
+    {
+        name: 'Admin User',
+        email: 'admin@crickbuddy.com',
+        password: 'admin123',
+        role: 'admin',
+        playerType: 'batsman',
+        experienceLevel: 'professional'
+    },
+    {
+        name: 'Rahul Coach',
+        email: 'coach@crickbuddy.com',
+        password: 'coach123',
+        role: 'coach',
+        playerType: 'all-rounder',
+        experienceLevel: 'professional'
+    },
+    {
+        name: 'Demo Player',
+        email: 'demo@crickbuddy.com',
+        password: 'demo123',
+        role: 'player',
+        playerType: 'all-rounder',
+        experienceLevel: 'intermediate',
+        battingStyle: 'right-handed',
+        bowlingStyle: 'right-arm-fast'
+    }
+];
 
 async function seed() {
-    console.log('🌱 Seeding PostgreSQL database via Prisma...');
+    if (process.env.NODE_ENV === 'production' && process.env.SEED_ALLOW_PRODUCTION !== 'true') {
+        throw new Error('Refusing to create demo accounts with known passwords in production. '
+            + 'Set SEED_ALLOW_PRODUCTION=true to override.');
+    }
 
-    // Clear existing data (order matters due to foreign keys)
-    console.log('🧹 Clearing existing data...');
-    await prisma.progressEntry.deleteMany({});
-    await prisma.analysisReport.deleteMany({});
-    await prisma.upload.deleteMany({});
-    await prisma.user.deleteMany({});
-    await prisma.academy.deleteMany({});
-
-    // Hash passwords
-    const adminPassword = await bcrypt.hash('admin123', 10);
-    const coachPassword = await bcrypt.hash('coach123', 10);
-    const playerPassword = await bcrypt.hash('demo123', 10);
-
-    console.log('👥 Creating users...');
-
-    // Create Admin
-    await prisma.user.create({
-        data: {
-            name: 'Admin User',
-            email: 'admin@crickbuddy.com',
-            password: adminPassword,
-            role: 'admin',
-            playerType: 'batsman',
-            experienceLevel: 'professional'
+    console.log('🌱 Ensuring demo accounts exist...');
+    for (const { password, ...profile } of DEMO_USERS) {
+        const existing = await prisma.user.findUnique({ where: { email: profile.email } });
+        if (existing) {
+            console.log(`  ✓ ${profile.email} already exists (${existing.role}) — left unchanged`);
+            continue;
         }
-    });
+        await prisma.user.create({ data: { ...profile, password: await bcrypt.hash(password, 12) } });
+        console.log(`  + created ${profile.email} (${profile.role})`);
+    }
 
-    // Create Coach
-    await prisma.user.create({
-        data: {
-            name: 'Rahul Coach',
-            email: 'coach@crickbuddy.com',
-            password: coachPassword,
-            role: 'coach',
-            playerType: 'all-rounder',
-            experienceLevel: 'professional'
-        }
-    });
-
-    // Create Demo Player
-    await prisma.user.create({
-        data: {
-            name: 'Demo Player',
-            email: 'demo@crickbuddy.com',
-            password: playerPassword,
-            role: 'player',
-            playerType: 'batsman',
-            experienceLevel: 'intermediate',
-            battingStyle: 'right-handed',
-            totalUploads: 5,
-            totalReports: 4,
-            overallScore: 76
-        }
-    });
-
-    console.log('✅ Seeding complete!');
     console.log('\n📋 Demo credentials:');
-    console.log('  Admin:  admin@crickbuddy.com / admin123');
-    console.log('  Coach:  coach@crickbuddy.com / coach123');
-    console.log('  Player: demo@crickbuddy.com / demo123');
+    for (const u of DEMO_USERS) console.log(`  ${u.role.padEnd(6)} ${u.email} / ${u.password}`);
 }
 
 seed()
     .catch((e) => {
-        console.error('❌ Seeding failed:', e);
-        process.exit(1);
+        console.error('❌ Seeding failed:', e.message);
+        process.exitCode = 1;
     })
     .finally(async () => {
         await prisma.$disconnect();
