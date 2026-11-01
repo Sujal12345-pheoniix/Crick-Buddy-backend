@@ -5,7 +5,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
 const path = require('path');
-const { aiAuthHeaders } = require('./aiAuth');
+const { aiServiceUrl, aiAuthHeaders, waitForAiService } = require('./aiService');
 
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 
@@ -43,15 +43,22 @@ function isServiceWakingError(err) {
         err?.code === 'EPIPE' ||
         err?.code === 'UND_ERR_SOCKET' ||
         /socket hang up/i.test(err?.message || '') ||
+        status === 429 ||   // Render's edge answers 429 while a sleeping service boots
         status === 502 ||
         status === 503
     );
 }
 
+// Delay before the next attempt: the server's Retry-After when given, else backoff.
+function retryDelayMs(err, fallback) {
+    const retryAfter = Number(err?.response?.headers?.['retry-after']);
+    return Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 60000) : fallback;
+}
+
 // POST to the AI service with backoff. `buildForm` is called for every attempt because a
 // multipart stream can only be sent once — reusing it would post an empty body on retry.
-async function callAiWithRetry(endpoint, buildForm, uploadId, maxAttempts = 4) {
-    const aiUrl = process.env.AI_SERVICE_URL;
+async function callAiWithRetry(endpoint, buildForm, uploadId, maxAttempts = 5) {
+    const aiUrl = aiServiceUrl();
 
     console.log(`[AI_REQUEST:START] Starting AI analysis for upload ${uploadId} to endpoint: ${endpoint}`);
 
@@ -92,7 +99,7 @@ async function callAiWithRetry(endpoint, buildForm, uploadId, maxAttempts = 4) {
                 errorType = 'TIMEOUT';
             } else if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'UND_ERR_SOCKET' || /socket hang up/i.test(err.message || '')) {
                 errorType = 'CONNECTION_REFUSED';
-            } else if (status === 502 || status === 503 || status === 504) {
+            } else if (status === 429 || status === 502 || status === 503) {
                 errorType = 'SERVICE_SLEEPING_OR_BAD_GATEWAY';
             } else if (status && status !== 200) {
                 errorType = 'INVALID_RESPONSE';
@@ -102,9 +109,12 @@ async function callAiWithRetry(endpoint, buildForm, uploadId, maxAttempts = 4) {
             
             if (!isServiceWakingError(err)) break;
             if (attempt < maxAttempts) {
-                console.log(`[AI_REQUEST:RETRY] Retrying in ${delay}ms...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                delay *= 2; // exponential backoff
+                const wait = retryDelayMs(err, delay);
+                console.log(`[AI_REQUEST:RETRY] Retrying in ${wait}ms...`);
+                await new Promise(resolve => setTimeout(resolve, wait));
+                delay = Math.min(delay * 2, 60000); // exponential backoff
+                // A booting service can take a minute or more: wait for /health before re-sending the video.
+                await waitForAiService({ timeoutMs: 120000 });
             }
         }
     }
@@ -273,8 +283,21 @@ async function processJob(job) {
             data: { status: 'processing', processingProgress: 10, errorMessage: null }
         });
 
-        const aiUrl = process.env.AI_SERVICE_URL;
-        const endpoint = `${aiUrl}/analyze/${type}`;
+        const endpoint = `${aiServiceUrl()}/analyze/${type}`;
+
+        // Wake the AI service before sending the video: a sleeping free-tier instance
+        // answers 429/503 for a minute or more while it boots.
+        const awake = await waitForAiService({
+            onWaiting: () => prisma.upload.update({
+                where: { id: uploadId },
+                data: { processingProgress: 15, errorMessage: 'Starting the analysis engine — this can take up to a minute.' }
+            }).catch(() => {})
+        });
+        if (!awake) {
+            const err = new Error('AI analysis service did not start in time');
+            err.response = { status: 503 };   // treated as "unavailable": upload stays pending and is retried
+            throw err;
+        }
 
         // Locally stored files are streamed from disk; cloud files are fetched by the AI service.
         const hasLocalFile = Boolean(filePath && fs.existsSync(filePath));
