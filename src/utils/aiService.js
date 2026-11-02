@@ -21,12 +21,22 @@ const AI_WAKE_TIMEOUT_MS = Number(process.env.AI_WAKE_TIMEOUT_MS) || 240000;
 async function waitForAiService({ timeoutMs = AI_WAKE_TIMEOUT_MS, onWaiting } = {}) {
     const deadline = Date.now() + timeoutMs;
     let notified = false;
+    let warnedWrongService = false;
     while (Date.now() < deadline) {
         try {
             const res = await axios.get(`${aiServiceUrl()}/health`, { timeout: 20000 });
-            if (res.status === 200) return true;
-        } catch (_) {
-            // still booting / unreachable — keep polling
+            if (res.status === 200 && res.data?.service === 'crick-buddy-ai') return true;
+            if (res.status === 200 && !warnedWrongService) {
+                warnedWrongService = true;
+                console.error(`❌ AI_SERVICE_URL (${aiServiceUrl()}) answered /health but is not the CrickBuddy AI service. Check the port.`);
+            }
+        } catch (err) {
+            // A 404 on /health means some other app owns this port.
+            if (err.response?.status === 404 && !warnedWrongService) {
+                warnedWrongService = true;
+                console.error(`❌ AI_SERVICE_URL (${aiServiceUrl()}) has no /health route — another app is using this port. Point AI_SERVICE_URL at the CrickBuddy AI service.`);
+            }
+            // otherwise still booting / unreachable — keep polling
         }
         if (!notified && onWaiting) {
             notified = true;

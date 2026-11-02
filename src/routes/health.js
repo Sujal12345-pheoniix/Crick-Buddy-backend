@@ -16,7 +16,7 @@ router.get('/health', async (req, res) => {
 
 // GET /api/status — Detailed diagnosis of backend + AI service
 router.get('/status', async (req, res) => {
-    const aiUrl = aiServiceUrl() || 'http://localhost:8000';
+    const aiUrl = aiServiceUrl() || 'http://localhost:8001';
     const statusInfo = {
         backend: {
             status: 'ok',
