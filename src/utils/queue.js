@@ -235,9 +235,9 @@ function getRedisUrl() {
     const restUrl   = process.env.UPSTASH_REDIS_REST_URL;
     const restToken = process.env.UPSTASH_REDIS_REST_TOKEN;
     if (restUrl && restToken) {
-        // Convert https://host.upstash.io → rediss://default:<token>@host.upstash.io:6380
+        // Convert https://host.upstash.io → rediss://default:<token>@host.upstash.io:6379
         const host = restUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        const url = `rediss://default:${restToken}@${host}:6380`;
+        const url = `rediss://default:${restToken}@${host}:6379`;
         console.log(`ℹ️  Redis URL auto-constructed from Upstash credentials (host: ${host})`);
         return url;
     }
@@ -254,15 +254,32 @@ function getRedisConnection() {
         return null;
     }
 
+    let lastErrorMessage = null;
     connection = new IORedis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
         lazyConnect: true,
+        connectTimeout: 10000,
         tls: redisUrl.startsWith('rediss://') ? {} : undefined,
+        // Back off up to 30s between reconnects; give up for good on DNS failures
+        // (a deleted/renamed Upstash database will never come back).
+        retryStrategy: (times) => {
+            if (lastErrorMessage && lastErrorMessage.includes('ENOTFOUND')) return null;
+            return Math.min(times * 1000, 30000);
+        },
     });
 
     connection.on('error', (err) => {
-        console.warn('⚠️  Redis connection error (queue disabled):', err.message);
+        // Log each distinct error once instead of on every reconnect attempt.
+        if (err.message !== lastErrorMessage) {
+            console.warn('⚠️  Redis connection error (using direct processing):', err.message);
+        }
+        lastErrorMessage = err.message;
+    });
+
+    connection.on('end', () => {
+        console.warn('⚠️  Redis connection closed — falling back to direct processing mode');
+        shutdownQueue();
     });
 
     connection.on('connect', () => {
@@ -642,13 +659,40 @@ async function processJob(job) {
 }
 
 // ─── Initialize Queue + Worker (lazy — only if Redis is available) ──────────
-function initQueue() {
+function isRedisReady() {
+    return Boolean(analysisQueue && connection && connection.status === 'ready');
+}
+
+function shutdownQueue() {
+    const queue = analysisQueue;
+    const worker = analysisWorker;
+    const conn = connection;
+    analysisQueue = null;
+    analysisWorker = null;
+    connection = null;
+    if (worker) worker.close().catch(() => {});
+    if (queue) queue.close().catch(() => {});
+    if (conn) conn.disconnect();
+}
+
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function initQueue() {
     try {
         const conn = getRedisConnection();
         if (!conn) {
             console.log('ℹ️  Queue skipped — no Redis URL configured. Using direct processing mode.');
             return;
         }
+        // Verify Redis is actually reachable before routing any jobs through it.
+        await withTimeout(conn.connect().then(() => conn.ping()), 15000, 'Redis connect');
+
         analysisQueue = new Queue('video-analysis', {
             connection: conn,
             defaultJobOptions: {
@@ -674,9 +718,8 @@ function initQueue() {
 
         console.log('🔄 Video analysis queue initialized');
     } catch (err) {
-        console.warn('⚠️  Queue init failed (Redis may be offline):', err.message);
-        analysisQueue = null;
-        analysisWorker = null;
+        console.warn('⚠️  Queue init failed (Redis unreachable) — using direct processing mode:', err.message);
+        shutdownQueue();
     }
 }
 
@@ -735,16 +778,16 @@ function buildJobData(upload) {
 
 // ─── Exported enqueue function ───────────────────────────────────────────────
 async function enqueueAnalysis(data) {
-    if (isQueueEnabled() && analysisQueue) {
+    if (isQueueEnabled() && isRedisReady()) {
         try {
             console.log(`📡 Queuing analysis for upload: ${data.uploadId}`);
             // jobId = uploadId de-duplicates re-queues of the same upload.
-            return await analysisQueue.add('analyze-video', data, {
+            return await withTimeout(analysisQueue.add('analyze-video', data, {
                 jobId: data.uploadId,
                 attempts: 1,
                 removeOnComplete: true,
                 removeOnFail: true,
-            });
+            }), 10000, 'Redis enqueue');
         } catch (err) {
             console.error('❌ Redis queue failed at runtime, falling back to direct mode:', err.message);
         }
@@ -773,8 +816,8 @@ async function recoverStalledUploads({ includeProcessing = false } = {}) {
 
         for (const upload of stalled) {
             if (activeUploads.has(upload.id)) continue;
-            if (isQueueEnabled() && analysisQueue) {
-                const queued = await analysisQueue.getJob(upload.id).catch(() => null);
+            if (isQueueEnabled() && isRedisReady()) {
+                const queued = await withTimeout(analysisQueue.getJob(upload.id), 5000, 'Redis getJob').catch(() => null);
                 if (queued) continue;
             }
 
