@@ -11,7 +11,9 @@ const aiAuthHeaders = () => {
     return secret ? { 'X-Internal-Secret': secret } : {};
 };
 
-const AI_WAKE_TIMEOUT_MS = Number(process.env.AI_WAKE_TIMEOUT_MS) || 240000;
+// A sleeping Render free instance has to boot and load the pose models before it answers;
+// that regularly takes 1.5–4 minutes, so allow 6.
+const AI_WAKE_TIMEOUT_MS = Number(process.env.AI_WAKE_TIMEOUT_MS) || 360000;
 
 /**
  * Wait until the AI service answers /health. Free hosting tiers (e.g. Render) put
@@ -24,7 +26,8 @@ async function waitForAiService({ timeoutMs = AI_WAKE_TIMEOUT_MS, onWaiting } = 
     let warnedWrongService = false;
     while (Date.now() < deadline) {
         try {
-            const res = await axios.get(`${aiServiceUrl()}/health`, { timeout: 20000 });
+            // Render holds requests while a sleeping service boots, so give each poll room to wait.
+            const res = await axios.get(`${aiServiceUrl()}/health`, { timeout: 60000 });
             if (res.status === 200 && res.data?.service === 'crick-buddy-ai') return true;
             if (res.status === 200 && !warnedWrongService) {
                 warnedWrongService = true;
@@ -47,4 +50,30 @@ async function waitForAiService({ timeoutMs = AI_WAKE_TIMEOUT_MS, onWaiting } = 
     return false;
 }
 
-module.exports = { aiServiceUrl, aiAuthHeaders, waitForAiService };
+/**
+ * Fire-and-forget ping that starts a sleeping AI service booting. Called when a user
+ * opens the app so the boot overlaps with them picking and uploading a video.
+ * Throttled to one ping per minute.
+ */
+let lastWakeAt = 0;
+function wakeAiService() {
+    if (!aiServiceUrl() || Date.now() - lastWakeAt < 60000) return;
+    lastWakeAt = Date.now();
+    axios.get(`${aiServiceUrl()}/health`, { timeout: 180000 }).catch(() => {});
+}
+
+/**
+ * Optional keep-alive: ping the AI service every AI_KEEPALIVE_MINUTES so a free
+ * instance never sleeps. Off by default — two always-on free services exceed
+ * Render's 750 free instance hours per month.
+ */
+function startAiKeepAlive() {
+    const minutes = Number(process.env.AI_KEEPALIVE_MINUTES);
+    if (!minutes || minutes <= 0) return;
+    console.log(`ℹ️  AI keep-alive enabled: pinging every ${minutes} min`);
+    setInterval(() => {
+        axios.get(`${aiServiceUrl()}/health`, { timeout: 180000 }).catch(() => {});
+    }, minutes * 60000).unref();
+}
+
+module.exports = { aiServiceUrl, aiAuthHeaders, waitForAiService, wakeAiService, startAiKeepAlive };

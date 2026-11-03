@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const app = require('./app');
 const { startRecoverySweep } = require('./utils/queue');
-const { aiServiceUrl } = require('./utils/aiService');
+const { aiServiceUrl, wakeAiService, startAiKeepAlive } = require('./utils/aiService');
 const prisma = require('./utils/prisma');
 
 const PORT = process.env.PORT || 5000;
@@ -15,4 +15,7 @@ app.listen(PORT, () => {
         .then(() => console.log('✅ Database connected'))
         .catch((err) => console.error(`❌ Database not responding — uploads cannot be analysed until it is fixed: ${err.message}`));
     startRecoverySweep();
+    // The backend usually boots because a user just opened the app — wake the AI service too.
+    wakeAiService();
+    startAiKeepAlive();
 });
