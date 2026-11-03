@@ -1,4 +1,6 @@
 require('dotenv').config();
+// Printed before anything else loads, so a deploy log shows whether Node started at all.
+console.log(`ℹ️  Starting Crick-Buddy backend (node ${process.version}, PORT=${process.env.PORT || 'unset'})`);
 
 const app = require('./app');
 const { startRecoverySweep } = require('./utils/queue');
@@ -8,7 +10,8 @@ const prisma = require('./utils/prisma');
 const PORT = process.env.PORT || 5000;
 
 // ✅ START SERVER
-app.listen(PORT, () => {
+// Bind on all interfaces so Render's port scan can see the service.
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Crick-Buddy Backend running on PORT ${PORT} (${process.env.NODE_ENV || 'development'})`);
     console.log(`✅ AI Service URL: ${aiServiceUrl()}`);
     prisma.$queryRaw`SELECT 1`
