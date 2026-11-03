@@ -848,6 +848,12 @@ async function recoverStalledUploads({ includeProcessing = false } = {}) {
 let sweepTimer = null;
 function startRecoverySweep(intervalMs = 60 * 1000) {
     if (sweepTimer) return;
+    // A local backend pointed at the production database must not pick up production
+    // uploads and send them to a local AI service — set ENABLE_RECOVERY_SWEEP=false there.
+    if (String(process.env.ENABLE_RECOVERY_SWEEP || '').toLowerCase() === 'false') {
+        console.log('ℹ️  Upload recovery sweep disabled (ENABLE_RECOVERY_SWEEP=false)');
+        return;
+    }
     // On boot, anything still 'processing' belongs to a job that died with the old process.
     recoverStalledUploads({ includeProcessing: true });
     sweepTimer = setInterval(() => recoverStalledUploads(), intervalMs);
