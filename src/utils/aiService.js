@@ -63,12 +63,15 @@ function wakeAiService() {
 }
 
 /**
- * Optional keep-alive: ping the AI service every AI_KEEPALIVE_MINUTES so a free
- * instance never sleeps. Off by default — two always-on free services exceed
- * Render's 750 free instance hours per month.
+ * Keep-alive: ping the AI service every AI_KEEPALIVE_MINUTES (default 10) so it does
+ * not fall asleep while people are using the app. The timer only runs while this
+ * backend is awake, and the backend itself sleeps 15 minutes after the last user
+ * request, so this does not keep either free instance up around the clock.
+ * Set AI_KEEPALIVE_MINUTES=0 to disable.
  */
 function startAiKeepAlive() {
-    const minutes = Number(process.env.AI_KEEPALIVE_MINUTES);
+    const raw = process.env.AI_KEEPALIVE_MINUTES;
+    const minutes = raw === undefined || raw === '' ? 10 : Number(raw);
     if (!minutes || minutes <= 0) return;
     console.log(`ℹ️  AI keep-alive enabled: pinging every ${minutes} min`);
     setInterval(() => {
