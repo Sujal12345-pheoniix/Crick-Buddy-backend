@@ -5,6 +5,11 @@ const prisma = require('../utils/prisma');
 const upload = require('../config/multer');
 const { protect } = require('../middleware/auth');
 const { enqueueAnalysis, buildJobData, resetRecoveryAttempts } = require('../utils/queue');
+const { wakeAiService } = require('../utils/aiService');
+
+// Start a sleeping AI service booting while the user is still on the uploads page
+// or the video is still being transferred, instead of only once the job starts.
+const wakeAi = (req, res, next) => { wakeAiService(); next(); };
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
@@ -24,7 +29,7 @@ function matchesExpectedMedia(type, file) {
 }
 
 // ─── POST /api/uploads — Upload to Cloudinary then queue AI analysis ──────────
-router.post('/', protect, upload.single('file'), async (req, res) => {
+router.post('/', protect, wakeAi, upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'No file uploaded' });
@@ -90,7 +95,7 @@ router.post('/', protect, upload.single('file'), async (req, res) => {
 });
 
 // ─── GET /api/uploads — List user's uploads ───────────────────────────────────
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, wakeAi, async (req, res) => {
     try {
         const uploads = await prisma.upload.findMany({
             where: { userId: req.user.id },
